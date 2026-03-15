@@ -1,0 +1,1 @@
+{"channel":"ticker:1","ticker":{"s":"BTC","a":{"price":"100.5","size":"1.25"},"b":{"price":"100.0","size":"2.50"}},"timestamp":1700000000000,"type":"update/ticker"}
