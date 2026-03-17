@@ -1,23 +1,27 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use futures_util::{SinkExt, StreamExt};
+use fastwebsockets::OpCode;
 use serde_json::Value;
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
-use tokio_tungstenite::tungstenite::Error as WsError;
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::http::header::{ACCEPT, ACCEPT_LANGUAGE, ORIGIN, USER_AGENT};
-use tokio_tungstenite::tungstenite::http::{HeaderValue, StatusCode};
-use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use crate::config::AppConfig;
 use crate::discovery::{SymbolMarkets, normalize_base};
 use crate::feeds::{ExchangeFeed, FUNDING_CHANGE_EPSILON, backoff_delay_ms};
 use crate::model::{Exchange, FundingUpdate, MarketEvent, QuoteUpdate, now_ms};
+use crate::ws_fast::{connect_fast_websocket_with_headers, websocket_status_code};
 
 pub struct ExtendedFeed;
+
+const EXTENDED_WS_HEADERS: &[(&str, &str)] = &[
+    ("accept", "*/*"),
+    ("accept-language", "en-US,en;q=0.9"),
+    ("user-agent", "Mozilla/5.0 (compatible; cross-ex-arb/0.1)"),
+    ("origin", "https://app.extended.exchange"),
+];
 
 impl ExchangeFeed for ExtendedFeed {
     fn exchange(&self) -> Exchange {
@@ -28,11 +32,11 @@ impl ExchangeFeed for ExtendedFeed {
         &self,
         runtime: &Runtime,
         config: &AppConfig,
-        markets: &SymbolMarkets,
+        markets: Arc<SymbolMarkets>,
         event_tx: mpsc::Sender<MarketEvent>,
     ) {
         let ws_url = config.extended_ws_url.clone();
-        let feed_markets = markets.clone();
+        let feed_markets = Arc::clone(&markets);
         let quote_event_tx = event_tx.clone();
         runtime.spawn(async move {
             if let Err(err) = run_extended_feed(&ws_url, &feed_markets, quote_event_tx).await {
@@ -42,7 +46,7 @@ impl ExchangeFeed for ExtendedFeed {
 
         if config.funding_poll_secs > 0 {
             let funding_ws_url = config.extended_funding_ws_url.clone();
-            let funding_markets = markets.clone();
+            let funding_markets = Arc::clone(&markets);
             runtime.spawn(async move {
                 if let Err(err) =
                     run_extended_funding_feed(&funding_ws_url, &funding_markets, event_tx).await
@@ -117,8 +121,47 @@ fn extract_i64(value: &Value, paths: &[&[&str]]) -> Option<i64> {
     None
 }
 
+fn resolve_symbol_base(symbol_map: &HashMap<String, String>, market: &str) -> Option<String> {
+    if let Some(symbol_base) = symbol_map.get(market) {
+        return Some(symbol_base.clone());
+    }
+
+    let normalized = normalize_base(market);
+    symbol_map.get(&normalized).cloned()
+}
+
 fn top_of_side(levels: &Value, is_bid: bool) -> Option<(f64, f64)> {
     let entries = levels.as_array()?;
+
+    // Extended orderbook payloads are typically best-first. Fast-path this
+    // layout and keep the scan fallback for malformed/outlier payloads.
+    if let Some((px, qty)) = entries.first().and_then(|level| match level {
+        Value::Array(items) if items.len() >= 2 => {
+            let px = as_f64(items.first()?)?;
+            let qty = as_f64(items.get(1)?)?;
+            Some((px, qty))
+        }
+        Value::Object(map) => {
+            let px = map
+                .get("p")
+                .or_else(|| map.get("price"))
+                .or_else(|| map.get("px"))
+                .and_then(as_f64)?;
+            let qty = map
+                .get("q")
+                .or_else(|| map.get("size"))
+                .or_else(|| map.get("s"))
+                .or_else(|| map.get("amount"))
+                .or_else(|| map.get("qty"))
+                .and_then(as_f64)?;
+            Some((px, qty))
+        }
+        _ => None,
+    }) {
+        if px > 0.0 && qty > 0.0 {
+            return Some((px, qty));
+        }
+    }
 
     let mut best_px: Option<f64> = None;
     let mut best_qty: Option<f64> = None;
@@ -179,7 +222,7 @@ pub fn parse_extended_orderbook_message(
     symbol_map: &HashMap<String, String>,
     recv_ts_ms: i64,
 ) -> Option<QuoteUpdate> {
-    let root: Value = serde_json::from_str(raw).ok()?;
+    let root: Value = sonic_rs::from_str(raw).ok()?;
 
     let market = extract_string(
         &root,
@@ -193,7 +236,7 @@ pub fn parse_extended_orderbook_message(
         ],
     )?;
 
-    let symbol_base = symbol_map.get(&normalize_base(market))?.clone();
+    let symbol_base = resolve_symbol_base(symbol_map, market)?;
 
     let bids = root
         .get("bids")
@@ -225,7 +268,7 @@ pub fn parse_extended_orderbook_message(
 
     Some(QuoteUpdate {
         exchange: Exchange::Extended,
-        symbol_base,
+        symbol_base: symbol_base.into(),
         bid_px,
         bid_qty,
         ask_px,
@@ -240,7 +283,7 @@ pub fn parse_extended_funding_message(
     symbol_map: &HashMap<String, String>,
     recv_ts_ms: i64,
 ) -> Option<FundingUpdate> {
-    let root: Value = serde_json::from_str(raw).ok()?;
+    let root: Value = sonic_rs::from_str(raw).ok()?;
 
     let market = extract_string(
         &root,
@@ -254,7 +297,7 @@ pub fn parse_extended_funding_message(
         ],
     )?;
 
-    let symbol_base = symbol_map.get(&normalize_base(market))?.clone();
+    let symbol_base = resolve_symbol_base(symbol_map, market)?;
 
     let funding_rate = root
         .get("fundingRate")
@@ -296,7 +339,7 @@ pub fn parse_extended_funding_message(
 
     Some(FundingUpdate {
         exchange: Exchange::Extended,
-        symbol_base,
+        symbol_base: symbol_base.into(),
         funding_rate,
         next_funding_ts_ms,
         recv_ts_ms: exch_ts_ms,
@@ -336,33 +379,15 @@ fn extended_symbol_map(markets: &SymbolMarkets) -> HashMap<String, String> {
     inferred
 }
 
-fn extended_ws_request(
-    ws_url: &str,
-) -> anyhow::Result<tokio_tungstenite::tungstenite::http::Request<()>> {
-    let mut request = ws_url
-        .into_client_request()
-        .context("failed to build extended websocket request")?;
-    let headers = request.headers_mut();
-    headers.insert(ACCEPT, HeaderValue::from_static("*/*"));
-    headers.insert(ACCEPT_LANGUAGE, HeaderValue::from_static("en-US,en;q=0.9"));
-    headers.insert(
-        USER_AGENT,
-        HeaderValue::from_static("Mozilla/5.0 (compatible; cross-ex-arb/0.1)"),
-    );
-    headers.insert(
-        ORIGIN,
-        HeaderValue::from_static("https://app.extended.exchange"),
-    );
-    Ok(request)
-}
-
-fn extended_connect_backoff_ms(err: &WsError, attempt: u32, forbidden_streak: &mut u32) -> u64 {
-    if let WsError::Http(response) = err {
-        if response.status() == StatusCode::FORBIDDEN {
-            *forbidden_streak = forbidden_streak.saturating_add(1);
-            let exp = (*forbidden_streak).min(4);
-            return 30_000u64.saturating_mul(1u64 << exp);
-        }
+fn extended_connect_backoff_ms(
+    err: &anyhow::Error,
+    attempt: u32,
+    forbidden_streak: &mut u32,
+) -> u64 {
+    if websocket_status_code(err) == Some(403) {
+        *forbidden_streak = forbidden_streak.saturating_add(1);
+        let exp = (*forbidden_streak).min(4);
+        return 30_000u64.saturating_mul(1u64 << exp);
     }
 
     *forbidden_streak = 0;
@@ -386,32 +411,26 @@ pub async fn run_extended_feed(
 
     loop {
         tracing::info!(attempt, "connecting extended WS");
-        let request = match extended_ws_request(ws_url) {
-            Ok(req) => req,
-            Err(err) => {
-                tracing::warn!(error = %err, "extended WS request build failed");
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                continue;
-            }
-        };
-
-        match connect_async(request).await {
-            Ok((stream, _)) => {
+        match connect_fast_websocket_with_headers(ws_url, EXTENDED_WS_HEADERS).await {
+            Ok(mut ws) => {
                 tracing::info!("connected extended WS");
                 attempt = 0;
                 forbidden_streak = 0;
 
-                let (mut write_half, mut read_half) = stream.split();
-
-                while let Some(message_result) = read_half.next().await {
-                    match message_result.context("extended WS read error") {
-                        Ok(Message::Text(text)) => {
+                loop {
+                    match ws.read_frame().await.context("extended WS read error") {
+                        Ok(frame) if frame.opcode == OpCode::Text => {
+                            let text = match std::str::from_utf8(&frame.payload) {
+                                Ok(text) => text,
+                                Err(err) => {
+                                    tracing::debug!(error = %err, "extended WS text frame was not valid UTF-8");
+                                    continue;
+                                }
+                            };
                             let recv_ts_ms = now_ms();
-                            if let Some(update) = parse_extended_orderbook_message(
-                                text.as_ref(),
-                                &symbol_map,
-                                recv_ts_ms,
-                            ) {
+                            if let Some(update) =
+                                parse_extended_orderbook_message(text, &symbol_map, recv_ts_ms)
+                            {
                                 if event_tx.send(MarketEvent::Quote(update)).await.is_err() {
                                     tracing::info!(
                                         "extended feed stopped: market event channel closed"
@@ -420,14 +439,8 @@ pub async fn run_extended_feed(
                                 }
                             }
                         }
-                        Ok(Message::Ping(payload)) => {
-                            if let Err(err) = write_half.send(Message::Pong(payload)).await {
-                                tracing::warn!(error = %err, "extended WS pong failed");
-                                break;
-                            }
-                        }
-                        Ok(Message::Close(frame)) => {
-                            tracing::warn!(?frame, "extended WS closed by remote");
+                        Ok(frame) if frame.opcode == OpCode::Close => {
+                            tracing::warn!("extended WS closed by remote");
                             break;
                         }
                         Ok(_) => {}
@@ -471,35 +484,33 @@ pub async fn run_extended_funding_feed(
 
     loop {
         tracing::info!(attempt, "connecting extended funding WS");
-        let request = match extended_ws_request(ws_url) {
-            Ok(req) => req,
-            Err(err) => {
-                tracing::warn!(error = %err, "extended funding WS request build failed");
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                continue;
-            }
-        };
-
-        match connect_async(request).await {
-            Ok((stream, _)) => {
+        match connect_fast_websocket_with_headers(ws_url, EXTENDED_WS_HEADERS).await {
+            Ok(mut ws) => {
                 tracing::info!("connected extended funding WS");
                 attempt = 0;
                 forbidden_streak = 0;
 
-                let (mut write_half, mut read_half) = stream.split();
-
-                while let Some(message_result) = read_half.next().await {
-                    match message_result.context("extended funding WS read error") {
-                        Ok(Message::Text(text)) => {
+                loop {
+                    match ws
+                        .read_frame()
+                        .await
+                        .context("extended funding WS read error")
+                    {
+                        Ok(frame) if frame.opcode == OpCode::Text => {
+                            let text = match std::str::from_utf8(&frame.payload) {
+                                Ok(text) => text,
+                                Err(err) => {
+                                    tracing::debug!(error = %err, "extended funding WS text frame was not valid UTF-8");
+                                    continue;
+                                }
+                            };
                             let recv_ts_ms = now_ms();
 
-                            if let Some(update) = parse_extended_funding_message(
-                                text.as_ref(),
-                                &symbol_map,
-                                recv_ts_ms,
-                            ) {
+                            if let Some(update) =
+                                parse_extended_funding_message(text, &symbol_map, recv_ts_ms)
+                            {
                                 let should_emit = cache
-                                    .get(&update.symbol_base)
+                                    .get(update.symbol_base.as_str())
                                     .map(|prev| {
                                         (update.funding_rate - prev).abs() > FUNDING_CHANGE_EPSILON
                                     })
@@ -509,7 +520,7 @@ pub async fn run_extended_funding_feed(
                                     continue;
                                 }
 
-                                cache.insert(update.symbol_base.clone(), update.funding_rate);
+                                cache.insert(update.symbol_base.to_string(), update.funding_rate);
 
                                 if event_tx.send(MarketEvent::Funding(update)).await.is_err() {
                                     tracing::info!(
@@ -519,14 +530,8 @@ pub async fn run_extended_funding_feed(
                                 }
                             }
                         }
-                        Ok(Message::Ping(payload)) => {
-                            if let Err(err) = write_half.send(Message::Pong(payload)).await {
-                                tracing::warn!(error = %err, "extended funding WS pong failed");
-                                break;
-                            }
-                        }
-                        Ok(Message::Close(frame)) => {
-                            tracing::warn!(?frame, "extended funding WS closed by remote");
+                        Ok(frame) if frame.opcode == OpCode::Close => {
+                            tracing::warn!("extended funding WS closed by remote");
                             break;
                         }
                         Ok(_) => {}

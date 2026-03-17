@@ -1,0 +1,213 @@
+{
+  "command": [
+    "cargo",
+    "run",
+    "--release",
+    "--bin",
+    "perf_profile"
+  ],
+  "generated_at_utc": "2026-03-15T07:35:23.871145+00:00",
+  "metrics": {
+    "aster bookTicker": {
+      "ns_per_unit": 411.0,
+      "ns_stddev": 10.019425576792758,
+      "ns_unit": "ns/msg",
+      "throughput": 2432807.0,
+      "throughput_stddev": 56435.47434607657,
+      "throughput_unit": "msg/s"
+    },
+    "aster markPrice": {
+      "ns_per_unit": 229.4,
+      "ns_stddev": 5.875939641169453,
+      "ns_unit": "ns/msg",
+      "throughput": 4359074.0,
+      "throughput_stddev": 117850.57947059724,
+      "throughput_unit": "msg/s"
+    },
+    "edgeX depth": {
+      "ns_per_unit": 934.1,
+      "ns_stddev": 13.154804783381968,
+      "ns_unit": "ns/msg",
+      "throughput": 1070507.0,
+      "throughput_stddev": 14702.434477172668,
+      "throughput_unit": "msg/s"
+    },
+    "edgeX depth dual-parse": {
+      "ns_per_unit": 2578.7,
+      "ns_stddev": 20.04533750166257,
+      "ns_unit": "ns/msg",
+      "throughput": 387787.0,
+      "throughput_stddev": 2970.1883217511086,
+      "throughput_unit": "msg/s"
+    },
+    "edgeX depth fallback-value": {
+      "ns_per_unit": 1249.3,
+      "ns_stddev": 10.229478101165379,
+      "ns_unit": "ns/msg",
+      "throughput": 800480.0,
+      "throughput_stddev": 6648.359847862228,
+      "throughput_unit": "msg/s"
+    },
+    "edgeX depth fast-path": {
+      "ns_per_unit": 941.9,
+      "ns_stddev": 11.271202242884259,
+      "ns_unit": "ns/msg",
+      "throughput": 1061730.0,
+      "throughput_stddev": 12706.308380747992,
+      "throughput_unit": "msg/s"
+    },
+    "edgeX depth routed": {
+      "ns_per_unit": 946.2,
+      "ns_stddev": 21.85426477575687,
+      "ns_unit": "ns/msg",
+      "throughput": 1056846.0,
+      "throughput_stddev": 23531.449060542127,
+      "throughput_unit": "msg/s"
+    },
+    "edgeX ticker dual-parse": {
+      "ns_per_unit": 2600.7,
+      "ns_stddev": 28.31269836820372,
+      "ns_unit": "ns/msg",
+      "throughput": 384515.0,
+      "throughput_stddev": 4128.557159858904,
+      "throughput_unit": "msg/s"
+    },
+    "edgeX ticker funding": {
+      "ns_per_unit": 905.7,
+      "ns_stddev": 1.6027753706895507,
+      "ns_unit": "ns/msg",
+      "throughput": 1104111.0,
+      "throughput_stddev": 1971.713693437485,
+      "throughput_unit": "msg/s"
+    },
+    "edgeX ticker funding fallback-value": {
+      "ns_per_unit": 1087.4,
+      "ns_stddev": 5.69229498728079,
+      "ns_unit": "ns/msg",
+      "throughput": 919653.0,
+      "throughput_stddev": 4793.444899026169,
+      "throughput_unit": "msg/s"
+    },
+    "edgeX ticker funding fast-path": {
+      "ns_per_unit": 897.3,
+      "ns_stddev": 4.128760911782946,
+      "ns_unit": "ns/msg",
+      "throughput": 1114481.0,
+      "throughput_stddev": 5104.04521488158,
+      "throughput_unit": "msg/s"
+    },
+    "edgeX ticker routed": {
+      "ns_per_unit": 909.2,
+      "ns_stddev": 3.3068951533962583,
+      "ns_unit": "ns/msg",
+      "throughput": 1099829.0,
+      "throughput_stddev": 4008.3963820405233,
+      "throughput_unit": "msg/s"
+    },
+    "extended funding": {
+      "ns_per_unit": 644.4,
+      "ns_stddev": 11.250580231950517,
+      "ns_unit": "ns/msg",
+      "throughput": 1551807.0,
+      "throughput_stddev": 26471.669237549457,
+      "throughput_unit": "msg/s"
+    },
+    "extended orderbook": {
+      "ns_per_unit": 1000.4,
+      "ns_stddev": 14.119096603143161,
+      "ns_unit": "ns/msg",
+      "throughput": 999649.0,
+      "throughput_stddev": 14523.741421854387,
+      "throughput_unit": "msg/s"
+    },
+    "hyperliquid bbo": {
+      "ns_per_unit": 894.0,
+      "ns_stddev": 2.106075866524178,
+      "ns_unit": "ns/msg",
+      "throughput": 1118536.0,
+      "throughput_stddev": 2608.3272204401214,
+      "throughput_unit": "msg/s"
+    },
+    "hyperliquid bbo fallback-value": {
+      "ns_per_unit": 1224.3,
+      "ns_stddev": 14.468893837777918,
+      "ns_unit": "ns/msg",
+      "throughput": 816766.0,
+      "throughput_stddev": 9578.862388961785,
+      "throughput_unit": "msg/s"
+    },
+    "hyperliquid bbo fast-path": {
+      "ns_per_unit": 881.5,
+      "ns_stddev": 11.121250928839867,
+      "ns_unit": "ns/msg",
+      "throughput": 1134377.0,
+      "throughput_stddev": 13963.525016588357,
+      "throughput_unit": "msg/s"
+    },
+    "hyperliquid l2Book": {
+      "ns_per_unit": 1315.6,
+      "ns_stddev": 17.92657865355862,
+      "ns_unit": "ns/msg",
+      "throughput": 760103.0,
+      "throughput_stddev": 10091.383684444203,
+      "throughput_unit": "msg/s"
+    },
+    "ingest + snapshot/event": {
+      "ns_per_unit": 18320.3,
+      "ns_stddev": 164.7818827689774,
+      "ns_unit": "ns/ev",
+      "throughput": 54584.0,
+      "throughput_stddev": 500.06466248542966,
+      "throughput_unit": "ev/s"
+    },
+    "ingest + throttled snapshot": {
+      "ns_per_unit": 1567.0,
+      "ns_stddev": 4.913473539383539,
+      "ns_unit": "ns/ev",
+      "throughput": 638145.0,
+      "throughput_stddev": 1991.364858583178,
+      "throughput_unit": "ev/s"
+    },
+    "ingest only": {
+      "ns_per_unit": 649.2,
+      "ns_stddev": 2.177154105707728,
+      "ns_unit": "ns/ev",
+      "throughput": 1540347.0,
+      "throughput_stddev": 5136.253563315062,
+      "throughput_unit": "ev/s"
+    },
+    "lighter market stats funding": {
+      "ns_per_unit": 356.3,
+      "ns_stddev": 8.526950738035772,
+      "ns_unit": "ns/msg",
+      "throughput": 2806860.0,
+      "throughput_stddev": 68954.72292421713,
+      "throughput_unit": "msg/s"
+    },
+    "lighter ticker": {
+      "ns_per_unit": 1112.0,
+      "ns_stddev": 18.94805765478065,
+      "ns_unit": "ns/msg",
+      "throughput": 899258.0,
+      "throughput_stddev": 15624.355375147126,
+      "throughput_unit": "msg/s"
+    },
+    "run_engine end-to-end": {
+      "ns_per_unit": 854.1,
+      "ns_stddev": 5.54797260267208,
+      "ns_unit": "ns/ev",
+      "throughput": 1170785.0,
+      "throughput_stddev": 7573.870916953013,
+      "throughput_unit": "ev/s"
+    },
+    "snapshot only": {
+      "ns_per_unit": 16889.9,
+      "ns_stddev": 126.20418200501823,
+      "ns_unit": "ns/snap",
+      "throughput": 59207.0,
+      "throughput_stddev": 449.0664390339882,
+      "throughput_unit": "snaps/s"
+    }
+  },
+  "runs": 3
+}

@@ -1,14 +1,15 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use futures_util::{SinkExt, StreamExt};
+use fastwebsockets::{Frame, OpCode};
 use reqwest::StatusCode;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
-use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use crate::config::AppConfig;
 use crate::discovery::SymbolMarkets;
@@ -17,6 +18,7 @@ use crate::feeds::{
     funding_cache_ttl_ms, jittered_poll_ms,
 };
 use crate::model::{Exchange, FundingUpdate, MarketEvent, QuoteUpdate, now_ms};
+use crate::ws_fast::connect_fast_websocket;
 
 pub struct EdgeXFeed;
 
@@ -29,11 +31,11 @@ impl ExchangeFeed for EdgeXFeed {
         &self,
         runtime: &Runtime,
         config: &AppConfig,
-        markets: &SymbolMarkets,
+        markets: Arc<SymbolMarkets>,
         event_tx: mpsc::Sender<MarketEvent>,
     ) {
         let ws_url = config.edge_x_ws_url.clone();
-        let feed_markets = markets.clone();
+        let feed_markets = Arc::clone(&markets);
         let quote_event_tx = event_tx.clone();
         runtime.spawn(async move {
             if let Err(err) = run_edge_x_feed(&ws_url, &feed_markets, quote_event_tx).await {
@@ -148,6 +150,115 @@ fn parse_ticker_contract_id(channel: &str) -> Option<u32> {
     channel.strip_prefix("ticker.")?.parse::<u32>().ok()
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum BorrowedNumOrStr<'a> {
+    Number(f64),
+    String(&'a str),
+}
+
+fn de_opt_f64_from_num_or_str<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<BorrowedNumOrStr<'de>>::deserialize(deserializer)?;
+    Ok(value.and_then(|parsed| match parsed {
+        BorrowedNumOrStr::Number(num) => Some(num),
+        BorrowedNumOrStr::String(text) => text.parse::<f64>().ok(),
+    }))
+}
+
+fn de_opt_u32_from_num_or_str<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<BorrowedNumOrStr<'de>>::deserialize(deserializer)?;
+    Ok(value.and_then(|parsed| match parsed {
+        BorrowedNumOrStr::Number(num) => {
+            if num >= 0.0 {
+                Some(num as u32)
+            } else {
+                None
+            }
+        }
+        BorrowedNumOrStr::String(text) => text.parse::<u32>().ok(),
+    }))
+}
+
+fn de_opt_i64_from_num_or_str<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<BorrowedNumOrStr<'de>>::deserialize(deserializer)?;
+    Ok(value.and_then(|parsed| match parsed {
+        BorrowedNumOrStr::Number(num) => Some(num as i64),
+        BorrowedNumOrStr::String(text) => text.parse::<i64>().ok(),
+    }))
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct EdgeXTickerFastItem {
+    #[serde(
+        default,
+        rename = "contractId",
+        deserialize_with = "de_opt_u32_from_num_or_str"
+    )]
+    contract_id: Option<u32>,
+    #[serde(
+        default,
+        rename = "fundingRate",
+        alias = "funding_rate",
+        alias = "r",
+        deserialize_with = "de_opt_f64_from_num_or_str"
+    )]
+    funding_rate: Option<f64>,
+    #[serde(
+        default,
+        rename = "nextFundingTime",
+        alias = "nextFundingTimestamp",
+        alias = "fundingTimestamp",
+        deserialize_with = "de_opt_i64_from_num_or_str"
+    )]
+    next_funding_ts_ms: Option<i64>,
+    #[serde(
+        default,
+        rename = "fundingTime",
+        alias = "timestamp",
+        alias = "endTime",
+        deserialize_with = "de_opt_i64_from_num_or_str"
+    )]
+    exch_ts_ms: Option<i64>,
+}
+
+impl EdgeXTickerFastItem {
+    fn is_present(&self) -> bool {
+        self.contract_id.is_some()
+            || self.funding_rate.is_some()
+            || self.next_funding_ts_ms.is_some()
+            || self.exch_ts_ms.is_some()
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct EdgeXTickerFastContainer {
+    #[serde(default)]
+    data: Vec<EdgeXTickerFastItem>,
+    #[serde(flatten)]
+    item: EdgeXTickerFastItem,
+}
+
+#[derive(Debug, Deserialize)]
+struct EdgeXTickerFastRoot<'a> {
+    #[serde(default, borrow)]
+    channel: Option<&'a str>,
+    #[serde(default)]
+    content: Option<EdgeXTickerFastContainer>,
+    #[serde(default)]
+    data: Option<EdgeXTickerFastContainer>,
+    #[serde(default)]
+    payload: Option<EdgeXTickerFastContainer>,
+}
+
 fn as_f64(value: &Value) -> Option<f64> {
     match value {
         Value::Number(number) => number.as_f64(),
@@ -164,33 +275,49 @@ fn as_i64(value: &Value) -> Option<i64> {
     }
 }
 
+fn level_px_qty(level: &Value) -> Option<(f64, f64)> {
+    match level {
+        Value::Array(items) if items.len() >= 2 => {
+            let px = as_f64(items.first()?)?;
+            let qty = as_f64(items.get(1)?)?;
+            Some((px, qty))
+        }
+        Value::Object(map) => {
+            let px = map
+                .get("price")
+                .or_else(|| map.get("p"))
+                .or_else(|| map.get("px"))
+                .and_then(as_f64)?;
+            let qty = map
+                .get("size")
+                .or_else(|| map.get("q"))
+                .or_else(|| map.get("qty"))
+                .or_else(|| map.get("s"))
+                .and_then(as_f64)?;
+            Some((px, qty))
+        }
+        _ => None,
+    }
+}
+
 fn top_from_levels(levels: &Value, is_bid: bool) -> Option<(f64, f64)> {
     let levels = levels.as_array()?;
+
+    // edgeX depth payloads are ordered best-first in practice. Fast-path the
+    // common case and fall back to full scan for malformed levels.
+    if let Some((px, qty)) = levels.first().and_then(level_px_qty) {
+        if px > 0.0 && qty > 0.0 {
+            return Some((px, qty));
+        }
+    }
+
     let mut best_px: Option<f64> = None;
     let mut best_qty: Option<f64> = None;
 
     for level in levels {
-        let (px, qty) = match level {
-            Value::Array(items) if items.len() >= 2 => {
-                let px = as_f64(items.first()?)?;
-                let qty = as_f64(items.get(1)?)?;
-                (px, qty)
-            }
-            Value::Object(map) => {
-                let px = map
-                    .get("price")
-                    .or_else(|| map.get("p"))
-                    .or_else(|| map.get("px"))
-                    .and_then(as_f64)?;
-                let qty = map
-                    .get("size")
-                    .or_else(|| map.get("q"))
-                    .or_else(|| map.get("qty"))
-                    .or_else(|| map.get("s"))
-                    .and_then(as_f64)?;
-                (px, qty)
-            }
-            _ => continue,
+        let (px, qty) = match level_px_qty(level) {
+            Some(pair) => pair,
+            None => continue,
         };
 
         if px <= 0.0 || qty <= 0.0 {
@@ -215,12 +342,160 @@ fn top_from_levels(levels: &Value, is_bid: bool) -> Option<(f64, f64)> {
     Some((best_px?, best_qty?))
 }
 
+// ---------------------------------------------------------------------------
+// Typed fast-path structs for edgeX depth
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct EdgeXDepthLevel {
+    #[serde(
+        default,
+        alias = "p",
+        alias = "px",
+        deserialize_with = "de_opt_f64_from_num_or_str"
+    )]
+    price: Option<f64>,
+    #[serde(
+        default,
+        alias = "q",
+        alias = "qty",
+        alias = "s",
+        deserialize_with = "de_opt_f64_from_num_or_str"
+    )]
+    size: Option<f64>,
+}
+
+// Levels can arrive as either [[px, qty], ...] or [{price, size}, ...]
+// Use an untagged enum to handle both.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum EdgeXDepthLevelEntry {
+    Array(Vec<Value>),
+    Object(EdgeXDepthLevel),
+}
+
+impl EdgeXDepthLevelEntry {
+    fn px_qty(&self) -> Option<(f64, f64)> {
+        match self {
+            Self::Array(items) if items.len() >= 2 => {
+                let px = as_f64(&items[0])?;
+                let qty = as_f64(&items[1])?;
+                if px > 0.0 && qty > 0.0 {
+                    Some((px, qty))
+                } else {
+                    None
+                }
+            }
+            Self::Object(level) => {
+                let px = level.price.filter(|v| *v > 0.0)?;
+                let qty = level.size.filter(|v| *v > 0.0)?;
+                Some((px, qty))
+            }
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct EdgeXDepthFastItem {
+    #[serde(
+        default,
+        rename = "contractId",
+        deserialize_with = "de_opt_u32_from_num_or_str"
+    )]
+    contract_id: Option<u32>,
+    #[serde(default, alias = "b")]
+    bids: Option<Vec<EdgeXDepthLevelEntry>>,
+    #[serde(default, alias = "a")]
+    asks: Option<Vec<EdgeXDepthLevelEntry>>,
+    #[serde(default, alias = "t", deserialize_with = "de_opt_i64_from_num_or_str")]
+    timestamp: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EdgeXDepthFastContainer {
+    #[serde(default)]
+    data: Vec<EdgeXDepthFastItem>,
+    // Flatten handles the case where the item is at the container level
+    #[serde(flatten)]
+    item: EdgeXDepthFastItem,
+}
+
+#[derive(Debug, Deserialize)]
+struct EdgeXDepthFastRoot<'a> {
+    #[serde(default, borrow)]
+    channel: Option<&'a str>,
+    #[serde(default)]
+    content: Option<EdgeXDepthFastContainer>,
+    #[serde(default)]
+    data: Option<EdgeXDepthFastContainer>,
+    #[serde(default)]
+    payload: Option<EdgeXDepthFastContainer>,
+    #[serde(default, deserialize_with = "de_opt_i64_from_num_or_str")]
+    timestamp: Option<i64>,
+}
+
+fn top_entry(entries: &[EdgeXDepthLevelEntry]) -> Option<(f64, f64)> {
+    entries.first().and_then(|e| e.px_qty())
+}
+
+pub fn parse_edge_x_depth_message_fast(
+    raw: &str,
+    market_map: &HashMap<u32, String>,
+    recv_ts_ms: i64,
+) -> Option<QuoteUpdate> {
+    let root: EdgeXDepthFastRoot<'_> = sonic_rs::from_str(raw).ok()?;
+    let from_channel = root.channel.and_then(parse_channel_contract_id)?;
+    let payload = root.content.or(root.data).or(root.payload)?;
+
+    let first_data = payload.data.first().or_else(|| {
+        if payload.item.bids.is_some() || payload.item.asks.is_some() {
+            Some(&payload.item)
+        } else {
+            None
+        }
+    })?;
+
+    let contract_id = first_data.contract_id.unwrap_or(from_channel);
+    let symbol_base = market_map.get(&contract_id)?.clone();
+
+    let bids = first_data.bids.as_ref()?;
+    let asks = first_data.asks.as_ref()?;
+    let (bid_px, bid_qty) = top_entry(bids)?;
+    let (ask_px, ask_qty) = top_entry(asks)?;
+
+    let exch_ts_ms = first_data
+        .timestamp
+        .or(root.timestamp)
+        .unwrap_or(recv_ts_ms);
+
+    Some(QuoteUpdate {
+        exchange: Exchange::EdgeX,
+        symbol_base: symbol_base.into(),
+        bid_px,
+        bid_qty,
+        ask_px,
+        ask_qty,
+        exch_ts_ms,
+        recv_ts_ms,
+    })
+}
+
 pub fn parse_edge_x_depth_message(
     raw: &str,
     market_map: &HashMap<u32, String>,
     recv_ts_ms: i64,
 ) -> Option<QuoteUpdate> {
-    let root: Value = serde_json::from_str(raw).ok()?;
+    parse_edge_x_depth_message_fast(raw, market_map, recv_ts_ms)
+        .or_else(|| parse_edge_x_depth_message_fallback(raw, market_map, recv_ts_ms))
+}
+
+pub fn parse_edge_x_depth_message_fallback(
+    raw: &str,
+    market_map: &HashMap<u32, String>,
+    recv_ts_ms: i64,
+) -> Option<QuoteUpdate> {
+    let root: Value = sonic_rs::from_str(raw).ok()?;
 
     let channel = root.get("channel").and_then(Value::as_str);
     let from_channel = channel.and_then(parse_channel_contract_id);
@@ -271,7 +546,7 @@ pub fn parse_edge_x_depth_message(
 
     Some(QuoteUpdate {
         exchange: Exchange::EdgeX,
-        symbol_base,
+        symbol_base: symbol_base.into(),
         bid_px,
         bid_qty,
         ask_px,
@@ -281,12 +556,45 @@ pub fn parse_edge_x_depth_message(
     })
 }
 
-pub fn parse_edge_x_ticker_funding_message(
+pub fn parse_edge_x_ticker_funding_message_fast(
     raw: &str,
     market_map: &HashMap<u32, String>,
     recv_ts_ms: i64,
 ) -> Option<FundingUpdate> {
-    let root: Value = serde_json::from_str(raw).ok()?;
+    let root: EdgeXTickerFastRoot<'_> = sonic_rs::from_str(raw).ok()?;
+    let from_channel = root.channel.and_then(parse_ticker_contract_id)?;
+    let payload = root.content.or(root.data).or(root.payload)?;
+
+    let first_data = payload.data.first().or_else(|| {
+        if payload.item.is_present() {
+            Some(&payload.item)
+        } else {
+            None
+        }
+    })?;
+
+    let contract_id = first_data.contract_id.unwrap_or(from_channel);
+    let symbol_base = market_map.get(&contract_id)?.clone();
+    let funding_rate = first_data.funding_rate?;
+    let next_funding_ts_ms = first_data.next_funding_ts_ms;
+    let exch_ts_ms = first_data.exch_ts_ms.unwrap_or(recv_ts_ms);
+
+    Some(FundingUpdate {
+        exchange: Exchange::EdgeX,
+        symbol_base: symbol_base.into(),
+        funding_rate,
+        next_funding_ts_ms,
+        recv_ts_ms: exch_ts_ms,
+        stale_after_ms: None,
+    })
+}
+
+pub fn parse_edge_x_ticker_funding_message_fallback_value(
+    raw: &str,
+    market_map: &HashMap<u32, String>,
+    recv_ts_ms: i64,
+) -> Option<FundingUpdate> {
+    let root: Value = sonic_rs::from_str(raw).ok()?;
     let channel = root.get("channel").and_then(Value::as_str)?;
     let from_channel = parse_ticker_contract_id(channel)?;
 
@@ -332,12 +640,21 @@ pub fn parse_edge_x_ticker_funding_message(
 
     Some(FundingUpdate {
         exchange: Exchange::EdgeX,
-        symbol_base,
+        symbol_base: symbol_base.into(),
         funding_rate,
         next_funding_ts_ms,
         recv_ts_ms: exch_ts_ms,
         stale_after_ms: None,
     })
+}
+
+pub fn parse_edge_x_ticker_funding_message(
+    raw: &str,
+    market_map: &HashMap<u32, String>,
+    recv_ts_ms: i64,
+) -> Option<FundingUpdate> {
+    parse_edge_x_ticker_funding_message_fast(raw, market_map, recv_ts_ms)
+        .or_else(|| parse_edge_x_ticker_funding_message_fallback_value(raw, market_map, recv_ts_ms))
 }
 
 fn edge_x_market_map(markets: &SymbolMarkets) -> HashMap<u32, String> {
@@ -398,7 +715,7 @@ async fn emit_edge_x_funding_updates(
 
         let update = FundingUpdate {
             exchange: Exchange::EdgeX,
-            symbol_base,
+            symbol_base: symbol_base.into(),
             funding_rate,
             next_funding_ts_ms,
             recv_ts_ms,
@@ -415,8 +732,26 @@ async fn emit_edge_x_funding_updates(
     Ok(emitted)
 }
 
-fn extract_ping_time(raw: &str) -> Option<String> {
-    let value: Value = serde_json::from_str(raw).ok()?;
+fn extract_json_string_value<'a>(raw: &'a str, key_prefix: &str) -> Option<&'a str> {
+    let start = raw.find(key_prefix)? + key_prefix.len();
+    let tail = &raw[start..];
+    let end = tail.find('"')?;
+    Some(&tail[..end])
+}
+
+fn extract_ping_time(raw: &str) -> Option<Cow<'_, str>> {
+    if raw.contains("\"type\":\"ping\"") {
+        if let Some(value) = extract_json_string_value(raw, "\"time\":\"") {
+            return Some(Cow::Borrowed(value));
+        }
+        if let Some(value) = extract_json_string_value(raw, "\"timestamp\":\"") {
+            return Some(Cow::Borrowed(value));
+        }
+    } else if !raw.contains("\"ping\"") {
+        return None;
+    }
+
+    let value: Value = sonic_rs::from_str(raw).ok()?;
     if value.get("type")?.as_str()? != "ping" {
         return None;
     }
@@ -424,12 +759,12 @@ fn extract_ping_time(raw: &str) -> Option<String> {
     value
         .get("time")
         .and_then(Value::as_str)
-        .map(ToOwned::to_owned)
+        .map(|text| Cow::Owned(text.to_owned()))
         .or_else(|| {
             value
                 .get("timestamp")
                 .and_then(Value::as_str)
-                .map(ToOwned::to_owned)
+                .map(|text| Cow::Owned(text.to_owned()))
         })
 }
 
@@ -455,17 +790,18 @@ pub async fn run_edge_x_feed(
             "connecting edgeX WS"
         );
 
-        match connect_async(ws_url).await {
-            Ok((stream, _)) => {
+        match connect_fast_websocket(ws_url).await {
+            Ok(mut ws) => {
                 tracing::info!("connected edgeX WS");
                 attempt = 0;
-
-                let (mut write_half, mut read_half) = stream.split();
 
                 let mut subscribe_failed = false;
                 for contract_id in &market_ids {
                     let depth_payload = edge_x_depth_subscribe_payload(*contract_id);
-                    if let Err(err) = write_half.send(Message::Text(depth_payload)).await {
+                    if let Err(err) = ws
+                        .write_frame(Frame::text(depth_payload.into_bytes().into()))
+                        .await
+                    {
                         tracing::warn!(
                             error = %err,
                             contract_id,
@@ -476,7 +812,10 @@ pub async fn run_edge_x_feed(
                     }
 
                     let ticker_payload = edge_x_ticker_subscribe_payload(*contract_id);
-                    if let Err(err) = write_half.send(Message::Text(ticker_payload)).await {
+                    if let Err(err) = ws
+                        .write_frame(Frame::text(ticker_payload.into_bytes().into()))
+                        .await
+                    {
                         tracing::warn!(
                             error = %err,
                             contract_id,
@@ -484,6 +823,12 @@ pub async fn run_edge_x_feed(
                         );
                         subscribe_failed = true;
                         break;
+                    }
+                }
+                if !subscribe_failed {
+                    if let Err(err) = ws.flush().await {
+                        tracing::warn!(error = %err, "edgeX subscribe flush failed");
+                        subscribe_failed = true;
                     }
                 }
 
@@ -494,13 +839,25 @@ pub async fn run_edge_x_feed(
                     continue;
                 }
 
-                while let Some(message_result) = read_half.next().await {
-                    match message_result.context("edgeX WS read error") {
-                        Ok(Message::Text(text)) => {
-                            if let Some(ping_time) = extract_ping_time(text.as_ref()) {
-                                let pong =
-                                    format!("{{\"type\":\"pong\",\"time\":\"{ping_time}\"}}");
-                                if let Err(err) = write_half.send(Message::Text(pong)).await {
+                loop {
+                    match ws.read_frame().await.context("edgeX WS read error") {
+                        Ok(frame) if frame.opcode == OpCode::Text => {
+                            let raw = match std::str::from_utf8(&frame.payload) {
+                                Ok(text) => text,
+                                Err(err) => {
+                                    tracing::debug!(error = %err, "edgeX WS text frame was not valid UTF-8");
+                                    continue;
+                                }
+                            };
+
+                            if let Some(ping_time) = extract_ping_time(raw) {
+                                let mut pong = String::with_capacity(26 + ping_time.len());
+                                pong.push_str("{\"type\":\"pong\",\"time\":\"");
+                                pong.push_str(ping_time.as_ref());
+                                pong.push_str("\"}");
+                                if let Err(err) =
+                                    ws.write_frame(Frame::text(pong.into_bytes().into())).await
+                                {
                                     tracing::warn!(error = %err, "edgeX WS pong send failed");
                                     break;
                                 }
@@ -508,38 +865,66 @@ pub async fn run_edge_x_feed(
                             }
 
                             let recv_ts_ms = now_ms();
-                            if let Some(update) =
-                                parse_edge_x_depth_message(text.as_ref(), &market_map, recv_ts_ms)
-                            {
-                                if event_tx.send(MarketEvent::Quote(update)).await.is_err() {
-                                    tracing::info!(
-                                        "edgeX feed stopped: market event channel closed"
-                                    );
-                                    return Ok(());
+                            let is_depth = raw.contains("\"channel\":\"depth.");
+                            let is_ticker = raw.contains("\"channel\":\"ticker.");
+
+                            if is_depth {
+                                if let Some(update) =
+                                    parse_edge_x_depth_message(raw, &market_map, recv_ts_ms)
+                                {
+                                    if event_tx.send(MarketEvent::Quote(update)).await.is_err() {
+                                        tracing::info!(
+                                            "edgeX feed stopped: market event channel closed"
+                                        );
+                                        return Ok(());
+                                    }
                                 }
                             }
 
-                            if let Some(update) = parse_edge_x_ticker_funding_message(
-                                text.as_ref(),
-                                &market_map,
-                                recv_ts_ms,
-                            ) {
-                                if event_tx.send(MarketEvent::Funding(update)).await.is_err() {
-                                    tracing::info!(
-                                        "edgeX feed stopped: market event channel closed"
-                                    );
-                                    return Ok(());
+                            if is_ticker {
+                                if let Some(update) = parse_edge_x_ticker_funding_message(
+                                    raw,
+                                    &market_map,
+                                    recv_ts_ms,
+                                ) {
+                                    if event_tx.send(MarketEvent::Funding(update)).await.is_err() {
+                                        tracing::info!(
+                                            "edgeX feed stopped: market event channel closed"
+                                        );
+                                        return Ok(());
+                                    }
+                                }
+                            }
+
+                            // Fallback for schema variants where the channel marker is not present.
+                            if !is_depth && !is_ticker {
+                                if let Some(update) =
+                                    parse_edge_x_depth_message(raw, &market_map, recv_ts_ms)
+                                {
+                                    if event_tx.send(MarketEvent::Quote(update)).await.is_err() {
+                                        tracing::info!(
+                                            "edgeX feed stopped: market event channel closed"
+                                        );
+                                        return Ok(());
+                                    }
+                                }
+
+                                if let Some(update) = parse_edge_x_ticker_funding_message(
+                                    raw,
+                                    &market_map,
+                                    recv_ts_ms,
+                                ) {
+                                    if event_tx.send(MarketEvent::Funding(update)).await.is_err() {
+                                        tracing::info!(
+                                            "edgeX feed stopped: market event channel closed"
+                                        );
+                                        return Ok(());
+                                    }
                                 }
                             }
                         }
-                        Ok(Message::Ping(payload)) => {
-                            if let Err(err) = write_half.send(Message::Pong(payload)).await {
-                                tracing::warn!(error = %err, "edgeX WS pong failed");
-                                break;
-                            }
-                        }
-                        Ok(Message::Close(frame)) => {
-                            tracing::warn!(?frame, "edgeX WS closed by remote");
+                        Ok(frame) if frame.opcode == OpCode::Close => {
+                            tracing::warn!("edgeX WS closed by remote");
                             break;
                         }
                         Ok(_) => {}
@@ -771,5 +1156,30 @@ pub async fn run_edge_x_funding_poller(
         }
 
         tokio::time::sleep(Duration::from_millis(planned_sleep_ms)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_ping_time;
+
+    #[test]
+    fn extracts_ping_time_fast_path() {
+        let payload = r#"{"type":"ping","time":"1700000000123"}"#;
+        let extracted = extract_ping_time(payload).expect("ping time");
+        assert_eq!(extracted.as_ref(), "1700000000123");
+    }
+
+    #[test]
+    fn extracts_ping_time_json_fallback() {
+        let payload = r#"{ "type": "ping", "timestamp": "1700000000456" }"#;
+        let extracted = extract_ping_time(payload).expect("ping timestamp");
+        assert_eq!(extracted.as_ref(), "1700000000456");
+    }
+
+    #[test]
+    fn ignores_non_ping_payloads() {
+        let payload = r#"{"type":"quote-event","channel":"ticker.101"}"#;
+        assert!(extract_ping_time(payload).is_none());
     }
 }

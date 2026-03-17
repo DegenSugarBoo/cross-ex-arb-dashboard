@@ -13,7 +13,7 @@ fn quote(
 ) -> QuoteUpdate {
     QuoteUpdate {
         exchange,
-        symbol_base: symbol.to_owned(),
+        symbol_base: symbol.to_owned().into(),
         bid_px,
         bid_qty,
         ask_px,
@@ -29,6 +29,7 @@ fn spread_formula_and_size_notional_are_correct() {
     let sell = quote(Exchange::Aster, "BTC", 101.0, 2.0, 102.0, 4.0);
 
     let row = compute_direction_row(DirectionRowInput {
+        route_id: 7,
         symbol: "BTC",
         buy_ex: Exchange::Lighter,
         sell_ex: Exchange::Aster,
@@ -41,10 +42,11 @@ fn spread_formula_and_size_notional_are_correct() {
     .expect("row should be computed");
 
     assert!((row.raw_spread_bps - 100.0).abs() < 1e-9);
-    assert!((row.net_spread_bps - 92.0).abs() < 1e-9);
+    assert!((row.net_spread_bps - 84.0).abs() < 1e-9);
     assert!((row.max_base_qty - 2.0).abs() < 1e-9);
     assert!((row.max_usd_notional - 200.0).abs() < 1e-9);
     assert_eq!(row.age_ms, 200);
+    assert_eq!(row.route_id, 7);
 }
 
 #[test]
@@ -56,6 +58,7 @@ fn best_direction_selection_prefers_higher_net_then_raw() {
     let sell_lighter = quote(Exchange::Lighter, "ETH", 99.5, 5.0, 100.0, 5.0);
 
     let row_a = compute_direction_row(DirectionRowInput {
+        route_id: 10,
         symbol: "ETH",
         buy_ex: Exchange::Lighter,
         sell_ex: Exchange::Aster,
@@ -67,6 +70,7 @@ fn best_direction_selection_prefers_higher_net_then_raw() {
     });
 
     let row_b = compute_direction_row(DirectionRowInput {
+        route_id: 11,
         symbol: "ETH",
         buy_ex: Exchange::Aster,
         sell_ex: Exchange::Lighter,
@@ -80,13 +84,15 @@ fn best_direction_selection_prefers_higher_net_then_raw() {
     let best = select_best_direction(row_a, row_b).expect("one direction should win");
     assert_eq!(best.buy_ex, Exchange::Aster);
     assert_eq!(best.sell_ex, Exchange::Lighter);
+    assert_eq!(best.route_id, 11);
 }
 
 #[test]
 fn sorting_uses_net_then_raw_then_symbol() {
     let mut rows = vec![
         ArbRow {
-            symbol: "ETH".to_owned(),
+            route_id: 1,
+            symbol: "ETH".to_owned().into(),
             buy_ex: Exchange::Lighter,
             sell_ex: Exchange::Aster,
             buy_ask: 1.0,
@@ -103,7 +109,8 @@ fn sorting_uses_net_then_raw_then_symbol() {
             latency_ms: 1,
         },
         ArbRow {
-            symbol: "BTC".to_owned(),
+            route_id: 2,
+            symbol: "BTC".to_owned().into(),
             buy_ex: Exchange::Lighter,
             sell_ex: Exchange::Aster,
             buy_ask: 1.0,
@@ -120,7 +127,8 @@ fn sorting_uses_net_then_raw_then_symbol() {
             latency_ms: 1,
         },
         ArbRow {
-            symbol: "SOL".to_owned(),
+            route_id: 3,
+            symbol: "SOL".to_owned().into(),
             buy_ex: Exchange::Lighter,
             sell_ex: Exchange::Aster,
             buy_ask: 1.0,

@@ -1,0 +1,10 @@
+{
+  "topic": "instrumentInfo.H.BTCUSDT",
+  "type": "delta",
+  "data": {
+    "s": "BTCUSDT",
+    "fundingRate": "-0.000031",
+    "nextFundingTime": "1700006400000000",
+    "ts": "1700000041000"
+  }
+}

@@ -1,5 +1,9 @@
 use std::collections::HashMap;
 
+use cross_ex_arb::feeds::apex::{
+    ApexBookState, ApplyResult, apply_apex_delta, apply_apex_snapshot, best_quote_from_apex_state,
+    parse_apex_depth_event, parse_apex_instrument_info_message,
+};
 use cross_ex_arb::feeds::aster::{parse_book_ticker_message, parse_mark_price_message};
 use cross_ex_arb::feeds::edge_x::{
     parse_edge_x_depth_message, parse_edge_x_ticker_funding_message,
@@ -7,9 +11,13 @@ use cross_ex_arb::feeds::edge_x::{
 use cross_ex_arb::feeds::extended::{
     parse_extended_funding_message, parse_extended_orderbook_message,
 };
-use cross_ex_arb::feeds::hyperliquid::parse_hyperliquid_l2book_message;
+use cross_ex_arb::feeds::grvt::parse_grvt_ticker_message;
+use cross_ex_arb::feeds::hyperliquid::{
+    parse_hyperliquid_bbo_message, parse_hyperliquid_l2book_message,
+};
 use cross_ex_arb::feeds::lighter::{parse_market_stats_message, parse_ticker_message};
 use cross_ex_arb::model::Exchange;
+use ordered_float::OrderedFloat;
 
 #[test]
 fn parses_lighter_ticker_fixture() {
@@ -109,6 +117,27 @@ fn parses_extended_orderbook_message() {
 }
 
 #[test]
+fn parses_extended_orderbook_with_invalid_first_level() {
+    let payload = r#"{
+        "timestamp":1700000000123,
+        "data":{
+            "m":"BTC-USD",
+            "b":[["0","4.0"],["100.2","3.0"]],
+            "a":[["101.0","0"],["100.4","2.5"]]
+        }
+    }"#;
+    let symbol_map = HashMap::from([("BTC-USD".to_owned(), "BTC".to_owned())]);
+
+    let update = parse_extended_orderbook_message(payload, &symbol_map, 1_700_000_000_999)
+        .expect("extended orderbook fallback scan");
+
+    assert_eq!(update.exchange, Exchange::Extended);
+    assert_eq!(update.symbol_base, "BTC");
+    assert!((update.bid_px - 100.2).abs() < 1e-9);
+    assert!((update.ask_px - 100.4).abs() < 1e-9);
+}
+
+#[test]
 fn parses_extended_funding_message() {
     let payload = r#"{
         "timestamp":1700000010000,
@@ -204,4 +233,182 @@ fn parses_hyperliquid_l2book_message() {
     assert_eq!(update.symbol_base, "BTC");
     assert!((update.bid_px - 100.9).abs() < 1e-9);
     assert!((update.ask_px - 101.0).abs() < 1e-9);
+}
+
+#[test]
+fn parses_hyperliquid_l2book_with_invalid_first_level() {
+    let payload = r#"{
+        "channel":"l2Book",
+        "data":{
+            "coin":"BTC",
+            "time":1700000030000,
+            "levels":[
+                [{"px":"100.9","sz":"0","n":3},{"px":"100.7","sz":"2.0","n":1}],
+                [{"px":"0","sz":"2.0","n":1},{"px":"101.0","sz":"1.5","n":2}]
+            ]
+        }
+    }"#;
+    let symbol_map = HashMap::from([("BTC".to_owned(), "BTC".to_owned())]);
+
+    let update = parse_hyperliquid_l2book_message(payload, &symbol_map, 1_700_000_000_999)
+        .expect("hyperliquid l2Book fallback scan");
+
+    assert_eq!(update.exchange, Exchange::Hyperliquid);
+    assert_eq!(update.symbol_base, "BTC");
+    assert!((update.bid_px - 100.7).abs() < 1e-9);
+    assert!((update.ask_px - 101.0).abs() < 1e-9);
+}
+
+#[test]
+fn parses_hyperliquid_bbo_message() {
+    let payload = r#"{
+        "channel":"bbo",
+        "data":{
+            "coin":"BTC",
+            "time":1700000035000,
+            "bbo":[
+                {"px":"100.8","sz":"1.2","n":1},
+                {"px":"101.1","sz":"2.7","n":2}
+            ]
+        }
+    }"#;
+    let symbol_map = HashMap::from([("BTC".to_owned(), "BTC".to_owned())]);
+
+    let update = parse_hyperliquid_bbo_message(payload, &symbol_map, 1_700_000_000_999)
+        .expect("hyperliquid bbo");
+
+    assert_eq!(update.exchange, Exchange::Hyperliquid);
+    assert_eq!(update.symbol_base, "BTC");
+    assert!((update.bid_px - 100.8).abs() < 1e-9);
+    assert!((update.ask_px - 101.1).abs() < 1e-9);
+    assert!((update.bid_qty - 1.2).abs() < 1e-9);
+    assert!((update.ask_qty - 2.7).abs() < 1e-9);
+}
+
+#[test]
+fn parses_grvt_ticker_quote_and_funding_fixture() {
+    let payload = include_str!("../fixtures/grvt_ticker_quote_funding.json");
+    let symbol_map = HashMap::from([("BTC_USDT_Perp".to_owned(), "BTC".to_owned())]);
+
+    let (quote, funding) =
+        parse_grvt_ticker_message(payload, &symbol_map, 1_700_000_000_999).expect("grvt parse");
+    let quote = quote.expect("grvt quote");
+    let funding = funding.expect("grvt funding");
+
+    assert_eq!(quote.exchange, Exchange::Grvt);
+    assert_eq!(quote.symbol_base, "BTC");
+    assert!((quote.bid_px - 100.2).abs() < 1e-9);
+    assert!((quote.ask_px - 100.4).abs() < 1e-9);
+    assert_eq!(quote.exch_ts_ms, 1_700_000_000_123);
+
+    assert_eq!(funding.exchange, Exchange::Grvt);
+    assert_eq!(funding.symbol_base, "BTC");
+    assert!((funding.funding_rate - 0.00012).abs() < 1e-12);
+    assert_eq!(funding.next_funding_ts_ms, Some(1_700_003_600_000));
+}
+
+#[test]
+fn grvt_ignores_ack_messages() {
+    let payload = include_str!("../fixtures/grvt_ticker_ack.json");
+    let symbol_map = HashMap::from([("BTC_USDT_Perp".to_owned(), "BTC".to_owned())]);
+    assert!(parse_grvt_ticker_message(payload, &symbol_map, 1_700_000_000_999).is_none());
+}
+
+#[test]
+fn apex_snapshot_and_delta_produce_updated_best_quote() {
+    let snapshot_raw = include_str!("../fixtures/apex_depth_snapshot.json");
+    let delta_raw = include_str!("../fixtures/apex_depth_delta_update.json");
+    let mut state = ApexBookState::default();
+
+    let snapshot_event =
+        parse_apex_depth_event(snapshot_raw, 1_700_000_040_000).expect("apex snapshot parse");
+    assert!(apply_apex_snapshot(&mut state, &snapshot_event));
+
+    let delta_event =
+        parse_apex_depth_event(delta_raw, 1_700_000_040_100).expect("apex delta parse");
+    assert_eq!(
+        apply_apex_delta(&mut state, &delta_event),
+        ApplyResult::Applied
+    );
+
+    let quote =
+        best_quote_from_apex_state(&state, "BTC", delta_event.event_ts_ms, 1_700_000_040_101)
+            .expect("best quote");
+    assert_eq!(quote.exchange, Exchange::ApeX);
+    assert_eq!(quote.symbol_base, "BTC");
+    assert!((quote.bid_px - 100.6).abs() < 1e-9);
+    assert!((quote.ask_px - 100.7).abs() < 1e-9);
+}
+
+#[test]
+fn apex_zero_size_delta_deletes_levels() {
+    let snapshot_raw = include_str!("../fixtures/apex_depth_snapshot.json");
+    let delta_update_raw = include_str!("../fixtures/apex_depth_delta_update.json");
+    let delta_delete_raw = include_str!("../fixtures/apex_depth_delta_delete.json");
+    let mut state = ApexBookState::default();
+
+    let snapshot_event =
+        parse_apex_depth_event(snapshot_raw, 1_700_000_040_000).expect("apex snapshot parse");
+    assert!(apply_apex_snapshot(&mut state, &snapshot_event));
+
+    let delta_update =
+        parse_apex_depth_event(delta_update_raw, 1_700_000_040_100).expect("apex delta update");
+    assert_eq!(
+        apply_apex_delta(&mut state, &delta_update),
+        ApplyResult::Applied
+    );
+
+    let delta_delete_event =
+        parse_apex_depth_event(delta_delete_raw, 1_700_000_040_200).expect("apex delta delete");
+    assert_eq!(
+        apply_apex_delta(&mut state, &delta_delete_event),
+        ApplyResult::Applied
+    );
+
+    assert!(!state.bids.contains_key(&OrderedFloat(100.4)));
+    assert!(!state.asks.contains_key(&OrderedFloat(100.8)));
+}
+
+#[test]
+fn apex_sequence_mismatch_marks_state_for_resync() {
+    let snapshot_raw = include_str!("../fixtures/apex_depth_snapshot.json");
+    let bad_delta_raw = r#"{
+        "topic":"orderBook200.H.BTCUSDT",
+        "type":"delta",
+        "data":{
+            "s":"BTCUSDT",
+            "b":[["100.6","1.0"]],
+            "a":[["100.7","1.0"]],
+            "u":"1002",
+            "pu":"999"
+        }
+    }"#;
+    let mut state = ApexBookState::default();
+
+    let snapshot_event =
+        parse_apex_depth_event(snapshot_raw, 1_700_000_040_000).expect("apex snapshot parse");
+    assert!(apply_apex_snapshot(&mut state, &snapshot_event));
+
+    let bad_delta =
+        parse_apex_depth_event(bad_delta_raw, 1_700_000_040_300).expect("apex bad delta parse");
+    assert_eq!(
+        apply_apex_delta(&mut state, &bad_delta),
+        ApplyResult::NeedsResync
+    );
+    assert!(state.needs_resync);
+}
+
+#[test]
+fn apex_funding_parser_maps_fields() {
+    let payload = include_str!("../fixtures/apex_instrument_info_funding.json");
+    let symbol_map = HashMap::from([("BTCUSDT".to_owned(), "BTC".to_owned())]);
+
+    let update = parse_apex_instrument_info_message(payload, &symbol_map, 1_700_000_041_999)
+        .expect("apex funding parse");
+
+    assert_eq!(update.exchange, Exchange::ApeX);
+    assert_eq!(update.symbol_base, "BTC");
+    assert!((update.funding_rate - (-0.000031)).abs() < 1e-12);
+    assert_eq!(update.next_funding_ts_ms, Some(1_700_006_400_000));
+    assert_eq!(update.recv_ts_ms, 1_700_000_041_000);
 }

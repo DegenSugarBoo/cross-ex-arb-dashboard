@@ -1,0 +1,5 @@
+{
+  "op": "subscribe",
+  "selector": "v1.ticker.d.BTC_USDT_Perp",
+  "status": "ok"
+}

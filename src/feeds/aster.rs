@@ -1,13 +1,13 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use futures_util::{SinkExt, StreamExt};
+use fastwebsockets::{Frame, OpCode};
 use serde::Deserialize;
 use serde_json::json;
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
-use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use crate::config::AppConfig;
 use crate::discovery::{SymbolMarkets, normalize_base};
@@ -16,6 +16,7 @@ use crate::feeds::{
     funding_baseline_poll_ms, funding_cache_ttl_ms, jittered_poll_ms,
 };
 use crate::model::{Exchange, FundingUpdate, MarketEvent, QuoteUpdate, now_ms};
+use crate::ws_fast::connect_fast_websocket;
 
 pub struct AsterFeed;
 
@@ -28,11 +29,11 @@ impl ExchangeFeed for AsterFeed {
         &self,
         runtime: &Runtime,
         config: &AppConfig,
-        markets: &SymbolMarkets,
+        markets: Arc<SymbolMarkets>,
         event_tx: mpsc::Sender<MarketEvent>,
     ) {
         let ws_url = config.aster_ws_url.clone();
-        let feed_markets = markets.clone();
+        let feed_markets = Arc::clone(&markets);
         let quote_event_tx = event_tx.clone();
         runtime.spawn(async move {
             if let Err(err) = run_aster_feed(&ws_url, &feed_markets, quote_event_tx).await {
@@ -44,7 +45,7 @@ impl ExchangeFeed for AsterFeed {
             let funding_url = config.aster_funding_rest_url.clone();
             let poll_secs = config.funding_poll_secs;
             let timeout_secs = config.http_timeout_secs;
-            let funding_markets = markets.clone();
+            let funding_markets = Arc::clone(&markets);
             runtime.spawn(async move {
                 if let Err(err) = run_aster_funding_poller(
                     &funding_url,
@@ -120,19 +121,30 @@ pub fn aster_subscribe_payload(exchange_symbols: &[String], request_id: u64) -> 
     .to_string()
 }
 
+fn resolve_symbol_base(
+    symbol_map: &HashMap<String, String>,
+    exchange_symbol: &str,
+) -> Option<String> {
+    if let Some(symbol_base) = symbol_map.get(exchange_symbol) {
+        return Some(symbol_base.clone());
+    }
+
+    let normalized_symbol = normalize_base(exchange_symbol);
+    symbol_map.get(&normalized_symbol).cloned()
+}
+
 pub fn parse_book_ticker_message(
     raw: &str,
     symbol_map: &HashMap<String, String>,
     recv_ts_ms: i64,
 ) -> Option<QuoteUpdate> {
-    let message: AsterBookTickerMessage = serde_json::from_str(raw).ok()?;
+    let message: AsterBookTickerMessage = sonic_rs::from_str(raw).ok()?;
     if message.event_type.as_deref() != Some("bookTicker") {
         return None;
     }
 
     let exchange_symbol = message.symbol?;
-    let normalized_symbol = normalize_base(&exchange_symbol);
-    let symbol_base = symbol_map.get(&normalized_symbol)?.clone();
+    let symbol_base = resolve_symbol_base(symbol_map, &exchange_symbol)?;
 
     let bid_px = message.bid_px?.parse::<f64>().ok()?;
     let bid_qty = message.bid_qty?.parse::<f64>().ok()?;
@@ -150,7 +162,7 @@ pub fn parse_book_ticker_message(
 
     Some(QuoteUpdate {
         exchange: Exchange::Aster,
-        symbol_base,
+        symbol_base: symbol_base.into(),
         bid_px,
         bid_qty,
         ask_px,
@@ -165,20 +177,19 @@ pub fn parse_mark_price_message(
     symbol_map: &HashMap<String, String>,
     recv_ts_ms: i64,
 ) -> Option<FundingUpdate> {
-    let message: AsterMarkPriceMessage = serde_json::from_str(raw).ok()?;
+    let message: AsterMarkPriceMessage = sonic_rs::from_str(raw).ok()?;
     if message.event_type.as_deref() != Some("markPriceUpdate") {
         return None;
     }
 
     let exchange_symbol = message.symbol?;
-    let normalized_symbol = normalize_base(&exchange_symbol);
-    let symbol_base = symbol_map.get(&normalized_symbol)?.clone();
+    let symbol_base = resolve_symbol_base(symbol_map, &exchange_symbol)?;
 
     let funding_rate = message.funding_rate?.parse::<f64>().ok()?;
 
     Some(FundingUpdate {
         exchange: Exchange::Aster,
-        symbol_base,
+        symbol_base: symbol_base.into(),
         funding_rate,
         next_funding_ts_ms: message.next_funding_ts_ms,
         recv_ts_ms: message.event_ts_ms.unwrap_or(recv_ts_ms),
@@ -217,28 +228,44 @@ pub async fn run_aster_feed(
             "connecting aster WS"
         );
 
-        match connect_async(ws_url).await {
-            Ok((stream, _)) => {
+        match connect_fast_websocket(ws_url).await {
+            Ok(mut ws) => {
                 tracing::info!("connected aster WS");
                 attempt = 0;
 
-                let (mut write_half, mut read_half) = stream.split();
                 let payload = aster_subscribe_payload(&subscribe_symbols, 1);
-                if let Err(err) = write_half.send(Message::Text(payload)).await {
+                if let Err(err) = ws
+                    .write_frame(Frame::text(payload.into_bytes().into()))
+                    .await
+                {
                     tracing::warn!(error = %err, "aster subscribe failed");
                     let delay_ms = backoff_delay_ms(attempt);
                     attempt = attempt.saturating_add(1);
                     tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                     continue;
                 }
+                if let Err(err) = ws.flush().await {
+                    tracing::warn!(error = %err, "aster subscribe flush failed");
+                    let delay_ms = backoff_delay_ms(attempt);
+                    attempt = attempt.saturating_add(1);
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                    continue;
+                }
 
-                while let Some(message_result) = read_half.next().await {
-                    match message_result.context("aster WS read error") {
-                        Ok(Message::Text(text)) => {
+                loop {
+                    match ws.read_frame().await.context("aster WS read error") {
+                        Ok(frame) if frame.opcode == OpCode::Text => {
+                            let text = match std::str::from_utf8(&frame.payload) {
+                                Ok(text) => text,
+                                Err(err) => {
+                                    tracing::debug!(error = %err, "aster WS text frame was not valid UTF-8");
+                                    continue;
+                                }
+                            };
                             let recv_ts_ms = now_ms();
 
                             if let Some(update) =
-                                parse_book_ticker_message(text.as_ref(), &symbol_map, recv_ts_ms)
+                                parse_book_ticker_message(text, &symbol_map, recv_ts_ms)
                             {
                                 if event_tx.send(MarketEvent::Quote(update)).await.is_err() {
                                     tracing::info!(
@@ -249,8 +276,8 @@ pub async fn run_aster_feed(
                                 continue;
                             }
                         }
-                        Ok(Message::Close(frame)) => {
-                            tracing::warn!(?frame, "aster WS closed by remote");
+                        Ok(frame) if frame.opcode == OpCode::Close => {
+                            tracing::warn!("aster WS closed by remote");
                             break;
                         }
                         Ok(_) => {}
@@ -359,7 +386,7 @@ pub async fn run_aster_funding_poller(
                         cache.insert(symbol_base.clone(), funding_rate);
                         let update = FundingUpdate {
                             exchange: Exchange::Aster,
-                            symbol_base,
+                            symbol_base: symbol_base.into(),
                             funding_rate,
                             next_funding_ts_ms: Some(next_funding_time),
                             recv_ts_ms,

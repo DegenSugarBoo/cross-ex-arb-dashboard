@@ -19,6 +19,8 @@ const ASTER_BASE_TAKER_FEE_PCT: f64 = 0.04;
 const EXTENDED_BASE_TAKER_FEE_PCT: f64 = 0.025;
 const EDGE_X_BASE_TAKER_FEE_PCT: f64 = 0.038;
 const HYPERLIQUID_BASE_TAKER_FEE_PCT: f64 = 0.045;
+const GRVT_BASE_TAKER_FEE_PCT: f64 = 0.045;
+const APEX_BASE_TAKER_FEE_PCT: f64 = 0.05;
 
 pub type SymbolMarkets = HashMap<String, Vec<MarketMeta>>;
 
@@ -29,6 +31,8 @@ pub struct DiscoveryResult {
     pub extended_count: usize,
     pub edge_x_count: usize,
     pub hyperliquid_count: usize,
+    pub grvt_count: usize,
+    pub apex_count: usize,
     pub common_count: usize,
     pub symbols: SymbolMarkets,
 }
@@ -122,6 +126,147 @@ pub struct HyperliquidUniverseEntry {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
+pub enum GrvtInstrumentsResponse {
+    List(Vec<GrvtInstrument>),
+    Wrapped(GrvtInstrumentsEnvelope),
+}
+
+impl GrvtInstrumentsResponse {
+    pub fn instruments(&self) -> Vec<&GrvtInstrument> {
+        match self {
+            Self::List(items) => items.iter().collect(),
+            Self::Wrapped(items) => {
+                if !items.data.is_empty() {
+                    items.data.iter().collect()
+                } else if !items.instruments.is_empty() {
+                    items.instruments.iter().collect()
+                } else {
+                    items.result.iter().collect()
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GrvtInstrumentsEnvelope {
+    #[serde(default)]
+    pub data: Vec<GrvtInstrument>,
+    #[serde(default, rename = "instruments")]
+    pub instruments: Vec<GrvtInstrument>,
+    #[serde(default)]
+    pub result: Vec<GrvtInstrument>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GrvtInstrument {
+    #[serde(
+        default,
+        alias = "instrumentName",
+        alias = "instrument_name",
+        alias = "name",
+        alias = "instrument",
+        alias = "symbolName"
+    )]
+    pub symbol: Option<String>,
+    #[serde(
+        default,
+        alias = "instrumentType",
+        alias = "instrument_type",
+        alias = "contractType",
+        alias = "contract_type",
+        alias = "type",
+        alias = "marketType",
+        alias = "kind"
+    )]
+    pub instrument_type: Option<String>,
+    #[serde(default, alias = "state")]
+    pub status: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_opt_bool")]
+    pub active: Option<bool>,
+    #[serde(
+        default,
+        rename = "isActive",
+        alias = "is_active",
+        deserialize_with = "deserialize_opt_bool"
+    )]
+    pub is_active: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ApexSymbolsResponse {
+    #[serde(default, rename = "perpetualContract")]
+    pub perpetual_contract: Vec<ApexPerpetualContract>,
+    #[serde(default, rename = "perpetualContracts")]
+    pub perpetual_contracts: Vec<ApexPerpetualContract>,
+    #[serde(default)]
+    pub data: Option<ApexSymbolsData>,
+}
+
+impl ApexSymbolsResponse {
+    pub fn contracts(&self) -> Vec<&ApexPerpetualContract> {
+        if !self.perpetual_contract.is_empty() {
+            return self.perpetual_contract.iter().collect();
+        }
+        if !self.perpetual_contracts.is_empty() {
+            return self.perpetual_contracts.iter().collect();
+        }
+        if let Some(data) = &self.data {
+            if !data.perpetual_contract.is_empty() {
+                return data.perpetual_contract.iter().collect();
+            }
+            if !data.perpetual_contracts.is_empty() {
+                return data.perpetual_contracts.iter().collect();
+            }
+        }
+        Vec::new()
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ApexSymbolsData {
+    #[serde(default, rename = "perpetualContract")]
+    pub perpetual_contract: Vec<ApexPerpetualContract>,
+    #[serde(default, rename = "perpetualContracts")]
+    pub perpetual_contracts: Vec<ApexPerpetualContract>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ApexPerpetualContract {
+    #[serde(
+        default,
+        rename = "crossSymbolName",
+        alias = "crossSymbol",
+        alias = "symbol"
+    )]
+    pub cross_symbol_name: Option<String>,
+    #[serde(default, rename = "baseTokenId", alias = "baseAsset", alias = "base")]
+    pub base_token_id: Option<String>,
+    #[serde(
+        default,
+        rename = "enableTrade",
+        deserialize_with = "deserialize_opt_bool"
+    )]
+    pub enable_trade: Option<bool>,
+    #[serde(
+        default,
+        rename = "enableDisplay",
+        deserialize_with = "deserialize_opt_bool"
+    )]
+    pub enable_display: Option<bool>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(
+        default,
+        rename = "contractType",
+        alias = "contract_type",
+        alias = "symbolType"
+    )]
+    pub contract_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
 pub enum NumOrString {
     Number(f64),
     String(String),
@@ -169,6 +314,32 @@ where
     }
 }
 
+fn deserialize_opt_bool<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Debug, Deserialize)]
+    #[serde(untagged)]
+    enum BoolOrStringOrNum {
+        Bool(bool),
+        String(String),
+        Integer(i64),
+        Number(f64),
+    }
+
+    let value = Option::<BoolOrStringOrNum>::deserialize(deserializer)?;
+    Ok(value.and_then(|entry| match entry {
+        BoolOrStringOrNum::Bool(flag) => Some(flag),
+        BoolOrStringOrNum::String(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+            "true" | "t" | "yes" | "y" | "1" => Some(true),
+            "false" | "f" | "no" | "n" | "0" => Some(false),
+            _ => None,
+        },
+        BoolOrStringOrNum::Integer(num) => Some(num != 0),
+        BoolOrStringOrNum::Number(num) => Some(num != 0.0),
+    }))
+}
+
 pub fn normalize_base(input: &str) -> String {
     input.trim().to_ascii_uppercase()
 }
@@ -195,18 +366,132 @@ pub fn is_extended_perp_trading(market: &ExtendedMarket) -> bool {
             .unwrap_or(true)
 }
 
+fn status_allows_trading(status: Option<&str>) -> bool {
+    status
+        .map(|raw| {
+            raw.eq_ignore_ascii_case("ACTIVE")
+                || raw.eq_ignore_ascii_case("TRADING")
+                || raw.eq_ignore_ascii_case("ONLINE")
+                || raw.eq_ignore_ascii_case("ENABLED")
+        })
+        .unwrap_or(true)
+}
+
+pub fn is_grvt_perp_active(instrument: &GrvtInstrument) -> bool {
+    let is_perp = instrument
+        .instrument_type
+        .as_deref()
+        .map(|kind| kind.eq_ignore_ascii_case("PERPETUAL") || kind.eq_ignore_ascii_case("PERP"))
+        .unwrap_or(false);
+    if !is_perp {
+        return false;
+    }
+
+    instrument
+        .active
+        .or(instrument.is_active)
+        .unwrap_or_else(|| status_allows_trading(instrument.status.as_deref()))
+}
+
+pub fn derive_base_from_grvt_instrument(name: &str) -> Option<String> {
+    let upper = normalize_base(name);
+
+    for suffix in [
+        "_USDT_PERP",
+        "USDT_PERP",
+        "-USDT-PERP",
+        "_USD_PERP",
+        "USD_PERP",
+        "-USD-PERP",
+    ] {
+        if let Some(stripped) = upper.strip_suffix(suffix) {
+            let trimmed = stripped.trim_end_matches(['_', '-', '/']);
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_owned());
+            }
+        }
+    }
+
+    if let Some((base, quote)) = upper.split_once('_') {
+        if !base.is_empty() && (quote.starts_with("USDT") || quote.starts_with("USD")) {
+            return Some(base.to_owned());
+        }
+    }
+
+    if let Some((base, quote)) = upper.split_once('-') {
+        if !base.is_empty() && (quote.starts_with("USDT") || quote.starts_with("USD")) {
+            return Some(base.to_owned());
+        }
+    }
+
+    None
+}
+
+pub fn is_apex_perp_trading(contract: &ApexPerpetualContract) -> bool {
+    let trading_enabled = contract.enable_trade.unwrap_or(true);
+    let display_enabled = contract.enable_display.unwrap_or(true);
+    let is_perp = contract
+        .contract_type
+        .as_deref()
+        .map(|kind| kind.eq_ignore_ascii_case("PERPETUAL") || kind.eq_ignore_ascii_case("PERP"))
+        .unwrap_or(true);
+
+    trading_enabled
+        && display_enabled
+        && is_perp
+        && status_allows_trading(contract.status.as_deref())
+}
+
+fn parse_base_from_quote_symbol(symbol: &str) -> Option<String> {
+    let upper = normalize_base(symbol);
+
+    for suffix in [
+        "-USDT", "_USDT", "/USDT", "USDT", "-USD", "_USD", "/USD", "USD",
+    ] {
+        if let Some(stripped) = upper.strip_suffix(suffix) {
+            let trimmed = stripped.trim_end_matches(['_', '-', '/']);
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_owned());
+            }
+        }
+    }
+
+    if let Some((base, _)) = upper.split_once('-') {
+        if !base.is_empty() {
+            return Some(base.to_owned());
+        }
+    }
+    if let Some((base, _)) = upper.split_once('_') {
+        if !base.is_empty() {
+            return Some(base.to_owned());
+        }
+    }
+    if let Some((base, _)) = upper.split_once('/') {
+        if !base.is_empty() {
+            return Some(base.to_owned());
+        }
+    }
+
+    None
+}
+
+pub fn normalize_apex_symbol_base(contract: &ApexPerpetualContract) -> Option<String> {
+    if let Some(base) = contract
+        .base_token_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|base| !base.is_empty())
+    {
+        return Some(normalize_base(base));
+    }
+
+    let cross_symbol_name = contract.cross_symbol_name.as_deref()?;
+    parse_base_from_quote_symbol(cross_symbol_name)
+}
+
 fn is_edge_x_contract_trading(contract: &EdgeXContract) -> bool {
     let trading_enabled = contract.enable_trading.unwrap_or(true);
-    let status_ok = contract
-        .status
-        .as_deref()
-        .map(|status| {
-            status.eq_ignore_ascii_case("ACTIVE")
-                || status.eq_ignore_ascii_case("TRADING")
-                || status.eq_ignore_ascii_case("ONLINE")
-                || status.eq_ignore_ascii_case("ENABLED")
-        })
-        .unwrap_or(true);
+    let status_ok = status_allows_trading(contract.status.as_deref());
 
     trading_enabled && status_ok
 }
@@ -383,12 +668,48 @@ pub async fn discover_common(config: &AppConfig) -> anyhow::Result<DiscoveryResu
             .context("failed to parse hyperliquid discovery payload")
     };
 
-    let (lighter_result, aster_result, extended_result, edge_x_result, hyperliquid_result) = tokio::join!(
+    let grvt_future = async {
+        client
+            .get(&config.grvt_rest_url)
+            .send()
+            .await
+            .context("grvt discovery request failed")?
+            .error_for_status()
+            .context("grvt discovery non-success HTTP status")?
+            .json::<GrvtInstrumentsResponse>()
+            .await
+            .context("failed to parse grvt discovery payload")
+    };
+
+    let apex_future = async {
+        client
+            .get(&config.apex_rest_url)
+            .send()
+            .await
+            .context("apex discovery request failed")?
+            .error_for_status()
+            .context("apex discovery non-success HTTP status")?
+            .json::<ApexSymbolsResponse>()
+            .await
+            .context("failed to parse apex discovery payload")
+    };
+
+    let (
+        lighter_result,
+        aster_result,
+        extended_result,
+        edge_x_result,
+        hyperliquid_result,
+        grvt_result,
+        apex_result,
+    ) = tokio::join!(
         lighter_future,
         aster_future,
         extended_future,
         edge_x_future,
-        hyperliquid_future
+        hyperliquid_future,
+        grvt_future,
+        apex_future
     );
 
     let lighter_data = match lighter_result {
@@ -423,6 +744,20 @@ pub async fn discover_common(config: &AppConfig) -> anyhow::Result<DiscoveryResu
         Ok(data) => Some(data),
         Err(err) => {
             tracing::warn!(error = %err, url = %config.hyperliquid_rest_url, "hyperliquid discovery unavailable; continuing without exchange");
+            None
+        }
+    };
+    let grvt_data = match grvt_result {
+        Ok(data) => Some(data),
+        Err(err) => {
+            tracing::warn!(error = %err, url = %config.grvt_rest_url, "grvt discovery unavailable; continuing without exchange");
+            None
+        }
+    };
+    let apex_data = match apex_result {
+        Ok(data) => Some(data),
+        Err(err) => {
+            tracing::warn!(error = %err, url = %config.apex_rest_url, "apex discovery unavailable; continuing without exchange");
             None
         }
     };
@@ -537,12 +872,60 @@ pub async fn discover_common(config: &AppConfig) -> anyhow::Result<DiscoveryResu
         })
         .unwrap_or_default();
 
+    let grvt_markets: Vec<MarketMeta> = grvt_data
+        .as_ref()
+        .map(|data| {
+            data.instruments()
+                .into_iter()
+                .filter(|instrument| is_grvt_perp_active(instrument))
+                .filter_map(|instrument| {
+                    let exchange_symbol = instrument.symbol.as_deref()?;
+                    let symbol_base = derive_base_from_grvt_instrument(exchange_symbol)?;
+
+                    Some(MarketMeta {
+                        exchange: Exchange::Grvt,
+                        symbol_base,
+                        exchange_symbol: exchange_symbol.to_owned(),
+                        market_id: None,
+                        taker_fee_pct: GRVT_BASE_TAKER_FEE_PCT,
+                        maker_fee_pct: 0.0,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let apex_markets: Vec<MarketMeta> = apex_data
+        .as_ref()
+        .map(|data| {
+            data.contracts()
+                .into_iter()
+                .filter(|contract| is_apex_perp_trading(contract))
+                .filter_map(|contract| {
+                    let exchange_symbol = contract.cross_symbol_name.as_deref()?;
+                    let symbol_base = normalize_apex_symbol_base(contract)?;
+
+                    Some(MarketMeta {
+                        exchange: Exchange::ApeX,
+                        symbol_base,
+                        exchange_symbol: exchange_symbol.to_owned(),
+                        market_id: None,
+                        taker_fee_pct: APEX_BASE_TAKER_FEE_PCT,
+                        maker_fee_pct: 0.0,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
     let live_exchange_count = [
         !lighter_markets.is_empty(),
         !aster_markets.is_empty(),
         !extended_markets.is_empty(),
         !edge_x_markets.is_empty(),
         !hyperliquid_markets.is_empty(),
+        !grvt_markets.is_empty(),
+        !apex_markets.is_empty(),
     ]
     .into_iter()
     .filter(|present| *present)
@@ -561,6 +944,8 @@ pub async fn discover_common(config: &AppConfig) -> anyhow::Result<DiscoveryResu
         extended_markets.clone(),
         edge_x_markets.clone(),
         hyperliquid_markets.clone(),
+        grvt_markets.clone(),
+        apex_markets.clone(),
     ]);
 
     Ok(DiscoveryResult {
@@ -569,6 +954,8 @@ pub async fn discover_common(config: &AppConfig) -> anyhow::Result<DiscoveryResu
         extended_count: extended_markets.len(),
         edge_x_count: edge_x_markets.len(),
         hyperliquid_count: hyperliquid_markets.len(),
+        grvt_count: grvt_markets.len(),
+        apex_count: apex_markets.len(),
         common_count: symbols.len(),
         symbols,
     })
@@ -590,6 +977,8 @@ pub async fn periodic_discovery_log(config: AppConfig) {
                 extended = result.extended_count,
                 edge_x = result.edge_x_count,
                 hyperliquid = result.hyperliquid_count,
+                grvt = result.grvt_count,
+                apex = result.apex_count,
                 common = result.common_count,
                 "periodic discovery refresh"
             ),
