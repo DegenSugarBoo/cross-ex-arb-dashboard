@@ -1,12 +1,12 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use futures_util::{SinkExt, StreamExt};
+use fastwebsockets::{Frame, OpCode};
 use serde::Deserialize;
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
-use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use crate::config::AppConfig;
 use crate::discovery::{SymbolMarkets, normalize_base};
@@ -15,6 +15,7 @@ use crate::feeds::{
     funding_cache_ttl_ms, jittered_poll_ms,
 };
 use crate::model::{Exchange, FundingUpdate, MarketEvent, QuoteUpdate, now_ms};
+use crate::ws_fast::connect_fast_websocket;
 
 pub struct LighterFeed;
 
@@ -27,11 +28,11 @@ impl ExchangeFeed for LighterFeed {
         &self,
         runtime: &Runtime,
         config: &AppConfig,
-        markets: &SymbolMarkets,
+        markets: Arc<SymbolMarkets>,
         event_tx: mpsc::Sender<MarketEvent>,
     ) {
         let ws_url = config.lighter_ws_url.clone();
-        let feed_markets = markets.clone();
+        let feed_markets = Arc::clone(&markets);
         let quote_event_tx = event_tx.clone();
         runtime.spawn(async move {
             if let Err(err) = run_lighter_feed(&ws_url, &feed_markets, quote_event_tx).await {
@@ -43,7 +44,7 @@ impl ExchangeFeed for LighterFeed {
             let funding_url = config.lighter_funding_rest_url.clone();
             let poll_secs = config.funding_poll_secs;
             let timeout_secs = config.http_timeout_secs;
-            let funding_markets = markets.clone();
+            let funding_markets = Arc::clone(&markets);
             runtime.spawn(async move {
                 if let Err(err) = run_lighter_funding_poller(
                     &funding_url,
@@ -63,34 +64,40 @@ impl ExchangeFeed for LighterFeed {
 
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
-enum NumOrString {
+enum BorrowedNumOrString<'a> {
     Number(f64),
-    String(String),
+    String(&'a str),
 }
 
 fn deserialize_f64<'de, D>(deserializer: D) -> Result<f64, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    match NumOrString::deserialize(deserializer)? {
-        NumOrString::Number(value) => Ok(value),
-        NumOrString::String(value) => value.parse().map_err(serde::de::Error::custom),
+    match BorrowedNumOrString::deserialize(deserializer)? {
+        BorrowedNumOrString::Number(value) => Ok(value),
+        BorrowedNumOrString::String(value) => value.parse().map_err(serde::de::Error::custom),
     }
 }
 
 #[derive(Debug, Deserialize)]
-struct LighterTickerMessage {
+struct LighterTickerMessage<'a> {
     #[serde(rename = "type")]
-    msg_type: Option<String>,
-    channel: Option<String>,
-    ticker: Option<LighterTickerPayload>,
+    #[serde(default, borrow)]
+    msg_type: Option<&'a str>,
+    #[serde(default, borrow)]
+    channel: Option<&'a str>,
+    #[serde(default)]
+    ticker: Option<LighterTickerPayload<'a>>,
     timestamp: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
-struct LighterTickerPayload {
-    s: Option<String>,
+struct LighterTickerPayload<'a> {
+    #[serde(default, borrow)]
+    s: Option<&'a str>,
+    #[serde(default)]
     a: Option<LighterSide>,
+    #[serde(default)]
     b: Option<LighterSide>,
 }
 
@@ -150,7 +157,7 @@ pub fn parse_ticker_message(
     market_map: &HashMap<u32, String>,
     recv_ts_ms: i64,
 ) -> Option<QuoteUpdate> {
-    let message: LighterTickerMessage = serde_json::from_str(raw).ok()?;
+    let message: LighterTickerMessage<'_> = sonic_rs::from_str(raw).ok()?;
 
     let msg_type = message.msg_type.as_deref()?;
     if msg_type != "update/ticker" && msg_type != "subscribed/ticker" {
@@ -167,16 +174,15 @@ pub fn parse_ticker_message(
 
     let from_channel = message
         .channel
-        .as_deref()
         .and_then(|channel| parse_market_id(channel, "ticker:"))
         .and_then(|market_id| market_map.get(&market_id).cloned());
 
-    let symbol_base = from_channel.or_else(|| ticker.s.map(|base| normalize_base(&base)))?;
+    let symbol_base = from_channel.or_else(|| ticker.s.map(normalize_base))?;
     let exch_ts_ms = message.timestamp.unwrap_or(recv_ts_ms);
 
     Some(QuoteUpdate {
         exchange: Exchange::Lighter,
-        symbol_base,
+        symbol_base: symbol_base.into(),
         bid_px: bid.price,
         bid_qty: bid.size,
         ask_px: ask.price,
@@ -220,7 +226,7 @@ pub fn parse_market_stats_message(
 
     Some(FundingUpdate {
         exchange: Exchange::Lighter,
-        symbol_base,
+        symbol_base: symbol_base.into(),
         funding_rate: rate,
         next_funding_ts_ms,
         recv_ts_ms: exch_ts_ms,
@@ -258,20 +264,27 @@ pub async fn run_lighter_feed(
             "connecting lighter WS"
         );
 
-        match connect_async(ws_url).await {
-            Ok((stream, _)) => {
+        match connect_fast_websocket(ws_url).await {
+            Ok(mut ws) => {
                 tracing::info!("connected lighter WS");
                 attempt = 0;
-
-                let (mut write_half, mut read_half) = stream.split();
 
                 let mut subscribe_failed = false;
                 for market_id in &market_ids {
                     let ticker_payload = lighter_ticker_subscribe_payload(*market_id);
-                    if let Err(err) = write_half.send(Message::Text(ticker_payload)).await {
+                    if let Err(err) = ws
+                        .write_frame(Frame::text(ticker_payload.into_bytes().into()))
+                        .await
+                    {
                         tracing::warn!(error = %err, market_id, "lighter ticker subscribe failed");
                         subscribe_failed = true;
                         break;
+                    }
+                }
+                if !subscribe_failed {
+                    if let Err(err) = ws.flush().await {
+                        tracing::warn!(error = %err, "lighter subscribe flush failed");
+                        subscribe_failed = true;
                     }
                 }
 
@@ -282,13 +295,20 @@ pub async fn run_lighter_feed(
                     continue;
                 }
 
-                while let Some(message_result) = read_half.next().await {
-                    match message_result.context("lighter WS read error") {
-                        Ok(Message::Text(text)) => {
+                loop {
+                    match ws.read_frame().await.context("lighter WS read error") {
+                        Ok(frame) if frame.opcode == OpCode::Text => {
+                            let text = match std::str::from_utf8(&frame.payload) {
+                                Ok(text) => text,
+                                Err(err) => {
+                                    tracing::debug!(error = %err, "lighter WS text frame was not valid UTF-8");
+                                    continue;
+                                }
+                            };
                             let recv_ts_ms = now_ms();
 
                             if let Some(update) =
-                                parse_ticker_message(text.as_ref(), &market_map, recv_ts_ms)
+                                parse_ticker_message(text, &market_map, recv_ts_ms)
                             {
                                 if event_tx.send(MarketEvent::Quote(update)).await.is_err() {
                                     tracing::info!(
@@ -299,8 +319,8 @@ pub async fn run_lighter_feed(
                                 continue;
                             }
                         }
-                        Ok(Message::Close(frame)) => {
-                            tracing::warn!(?frame, "lighter WS closed by remote");
+                        Ok(frame) if frame.opcode == OpCode::Close => {
+                            tracing::warn!("lighter WS closed by remote");
                             break;
                         }
                         Ok(_) => {}
@@ -387,7 +407,7 @@ pub async fn run_lighter_funding_poller(
                         cache.insert(symbol_base.clone(), item.rate);
                         let update = FundingUpdate {
                             exchange: Exchange::Lighter,
-                            symbol_base,
+                            symbol_base: symbol_base.into(),
                             funding_rate: item.rate,
                             next_funding_ts_ms: None,
                             recv_ts_ms,

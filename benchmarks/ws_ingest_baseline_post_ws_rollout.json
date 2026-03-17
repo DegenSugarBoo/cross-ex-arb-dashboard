@@ -1,0 +1,87 @@
+{
+  "command": [
+    "cargo",
+    "run",
+    "--release",
+    "--bin",
+    "ws_exchange_ingest_bench",
+    "--features",
+    "ws-compare-tungstenite"
+  ],
+  "generated_at_utc": "2026-03-15T14:26:35.344678+00:00",
+  "metrics": {
+    "aster ws ingest bookTicker": {
+      "ns_per_unit": 929.3,
+      "ns_stddev": 10.804114442604192,
+      "ns_unit": "ns/msg",
+      "throughput": 1076043.0,
+      "throughput_stddev": 12302.464044066764,
+      "throughput_unit": "msg/s"
+    },
+    "aster ws ingest markPrice": {
+      "ns_per_unit": 753.8,
+      "ns_stddev": 7.652595783276561,
+      "ns_unit": "ns/msg",
+      "throughput": 1326677.0,
+      "throughput_stddev": 13284.75986484764,
+      "throughput_unit": "msg/s"
+    },
+    "edgeX ws ingest depth": {
+      "ns_per_unit": 1489.6,
+      "ns_stddev": 7.12990571856011,
+      "ns_unit": "ns/msg",
+      "throughput": 671318.0,
+      "throughput_stddev": 3190.3759444094776,
+      "throughput_unit": "msg/s"
+    },
+    "edgeX ws ingest tickerFunding": {
+      "ns_per_unit": 1417.9,
+      "ns_stddev": 1.102522360569432,
+      "ns_unit": "ns/msg",
+      "throughput": 705251.0,
+      "throughput_stddev": 550.7269942741342,
+      "throughput_unit": "msg/s"
+    },
+    "extended ws ingest funding": {
+      "ns_per_unit": 1175.3,
+      "ns_stddev": 18.284115753541087,
+      "ns_unit": "ns/msg",
+      "throughput": 850873.0,
+      "throughput_stddev": 13576.572526066937,
+      "throughput_unit": "msg/s"
+    },
+    "extended ws ingest orderbook": {
+      "ns_per_unit": 1493.6,
+      "ns_stddev": 20.575767840404435,
+      "ns_unit": "ns/msg",
+      "throughput": 669530.0,
+      "throughput_stddev": 9256.56791448945,
+      "throughput_unit": "msg/s"
+    },
+    "hyperliquid ws ingest bbo": {
+      "ns_per_unit": 1383.1,
+      "ns_stddev": 9.947975785164607,
+      "ns_unit": "ns/msg",
+      "throughput": 723037.0,
+      "throughput_stddev": 5276.869105402896,
+      "throughput_unit": "msg/s"
+    },
+    "lighter ws ingest marketStats": {
+      "ns_per_unit": 924.0,
+      "ns_stddev": 13.227580613584976,
+      "ns_unit": "ns/msg",
+      "throughput": 1082217.0,
+      "throughput_stddev": 15258.583646226438,
+      "throughput_unit": "msg/s"
+    },
+    "lighter ws ingest ticker": {
+      "ns_per_unit": 1315.4,
+      "ns_stddev": 28.296053906272277,
+      "ns_unit": "ns/msg",
+      "throughput": 760208.0,
+      "throughput_stddev": 15651.29839839352,
+      "throughput_unit": "msg/s"
+    }
+  },
+  "runs": 3
+}

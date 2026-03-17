@@ -1,6 +1,8 @@
 use cross_ex_arb::discovery::{
-    AsterSymbol, ExtendedMarket, LighterOrderBook, is_aster_perp_trading, is_extended_perp_trading,
-    is_lighter_perp_active, normalize_base,
+    ApexPerpetualContract, AsterSymbol, ExtendedMarket, GrvtInstrument, LighterOrderBook,
+    derive_base_from_grvt_instrument, is_apex_perp_trading, is_aster_perp_trading,
+    is_extended_perp_trading, is_grvt_perp_active, is_lighter_perp_active,
+    normalize_apex_symbol_base, normalize_base,
 };
 
 #[test]
@@ -82,4 +84,61 @@ fn extended_filter_accepts_active_markets() {
     assert!(is_extended_perp_trading(&active));
     assert!(!is_extended_perp_trading(&disabled));
     assert!(!is_extended_perp_trading(&halted));
+}
+
+#[test]
+fn grvt_filter_and_base_derivation_work() {
+    let instrument = GrvtInstrument {
+        symbol: Some("BTC_USDT_Perp".to_owned()),
+        instrument_type: Some("PERPETUAL".to_owned()),
+        status: Some("ACTIVE".to_owned()),
+        active: Some(true),
+        is_active: None,
+    };
+
+    let inactive = GrvtInstrument {
+        active: Some(false),
+        ..instrument.clone()
+    };
+
+    assert!(is_grvt_perp_active(&instrument));
+    assert!(!is_grvt_perp_active(&inactive));
+    assert_eq!(
+        derive_base_from_grvt_instrument("BTC_USDT_Perp"),
+        Some("BTC".to_owned())
+    );
+}
+
+#[test]
+fn apex_filter_and_base_normalization_work() {
+    let contract = ApexPerpetualContract {
+        cross_symbol_name: Some("BTCUSDT".to_owned()),
+        base_token_id: Some("BTC".to_owned()),
+        enable_trade: Some(true),
+        enable_display: Some(true),
+        status: Some("TRADING".to_owned()),
+        contract_type: Some("PERPETUAL".to_owned()),
+    };
+
+    let disabled = ApexPerpetualContract {
+        enable_trade: Some(false),
+        ..contract.clone()
+    };
+
+    let fallback_parse = ApexPerpetualContract {
+        base_token_id: None,
+        cross_symbol_name: Some("ETHUSDT".to_owned()),
+        ..contract.clone()
+    };
+
+    assert!(is_apex_perp_trading(&contract));
+    assert!(!is_apex_perp_trading(&disabled));
+    assert_eq!(
+        normalize_apex_symbol_base(&contract),
+        Some("BTC".to_owned())
+    );
+    assert_eq!(
+        normalize_apex_symbol_base(&fallback_parse),
+        Some("ETH".to_owned())
+    );
 }

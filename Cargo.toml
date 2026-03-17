@@ -2,19 +2,53 @@
 name = "cross-ex-arb"
 version = "0.1.0"
 edition = "2024"
+default-run = "cross-ex-arb"
+
+[features]
+default = []
+ws-compare-tungstenite = ["dep:tokio-tungstenite", "dep:futures-util"]
 
 [dependencies]
 anyhow = "1.0"
+bytes = "1.10"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 clap = { version = "4.5", features = ["derive"] }
+compact_str = { version = "0.8", features = ["serde"] }
 eframe = "0.31"
-futures-util = "0.3"
+egui_plot = "0.31"
+fastwebsockets = { version = "0.10", features = ["upgrade"] }
+futures-util = { version = "0.3", optional = true }
+http-body-util = "0.1"
+hyper = { version = "1.7", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+libc = "0.2"
+lz4 = "1.28"
+mimalloc = { version = "0.1", default-features = false }
+ordered-float = "4"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1.0", features = ["derive"] }
+socket2 = "0.5"
 serde_json = "1.0"
-tokio = { version = "1.44", features = ["macros", "rt-multi-thread", "sync", "time"] }
-tokio-tungstenite = { version = "0.23", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+sonic-rs = "0.5.7"
+sysinfo = "0.33"
+tempfile = "3.13"
+tokio = { version = "1.44", features = ["macros", "rt-multi-thread", "sync", "time", "signal"] }
+tokio-rustls = "0.26"
+tokio-tungstenite = { version = "0.23", default-features = false, features = ["connect", "rustls-tls-webpki-roots"], optional = true }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+webpki-roots = "1.0"
+zstd = "0.13"
 
 [dev-dependencies]
-tokio = { version = "1.44", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1.44", features = ["macros", "rt-multi-thread", "sync", "time", "signal"] }
+
+[[bin]]
+name = "ws_transport_bench"
+path = "src/bin/ws_transport_bench.rs"
+required-features = ["ws-compare-tungstenite"]
+
+[[bin]]
+name = "ws_exchange_ingest_bench"
+path = "src/bin/ws_exchange_ingest_bench.rs"
+required-features = ["ws-compare-tungstenite"]

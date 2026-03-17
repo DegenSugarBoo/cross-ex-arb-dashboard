@@ -1,0 +1,30 @@
+name: perf-gates
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  perf-gates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Unit tests
+        run: cargo test -q
+
+      - name: Perf regression gate
+        run: python3 ./scripts/perf_regression_check.py --baseline benchmarks/perf_after_net_tuning.json --runs 3
+
+      - name: WS ingest regression gate
+        run: python3 ./scripts/ws_ingest_regression_check.py --baseline benchmarks/ws_ingest_baseline_post_ws_rollout.json --runs 3

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
 
@@ -5,9 +7,11 @@ use crate::config::AppConfig;
 use crate::discovery::SymbolMarkets;
 use crate::model::{Exchange, MarketEvent};
 
+pub mod apex;
 pub mod aster;
 pub mod edge_x;
 pub mod extended;
+pub mod grvt;
 pub mod hyperliquid;
 pub mod lighter;
 
@@ -25,7 +29,7 @@ pub trait ExchangeFeed: Send + Sync {
         &self,
         runtime: &Runtime,
         config: &AppConfig,
-        markets: &SymbolMarkets,
+        markets: Arc<SymbolMarkets>,
         event_tx: mpsc::Sender<MarketEvent>,
     );
 }
@@ -37,18 +41,20 @@ pub fn default_feeds() -> Vec<Box<dyn ExchangeFeed>> {
         Box::new(extended::ExtendedFeed),
         Box::new(edge_x::EdgeXFeed),
         Box::new(hyperliquid::HyperliquidFeed),
+        Box::new(grvt::GrvtFeed),
+        Box::new(apex::ApexFeed),
     ]
 }
 
 pub fn spawn_all_feeds(
     runtime: &Runtime,
     config: &AppConfig,
-    markets: &SymbolMarkets,
+    markets: Arc<SymbolMarkets>,
     event_tx: mpsc::Sender<MarketEvent>,
 ) {
     for feed in default_feeds() {
         tracing::info!(exchange = %feed.exchange(), "spawning exchange feed");
-        feed.spawn(runtime, config, markets, event_tx.clone());
+        feed.spawn(runtime, config, Arc::clone(&markets), event_tx.clone());
     }
 }
 
