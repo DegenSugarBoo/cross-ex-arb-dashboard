@@ -461,3 +461,79 @@ fn ranked_snapshot_all_and_top_twenty_apply_same_stale_filter_before_truncation(
         assert_eq!(top.symbol, all.symbol);
     }
 }
+
+#[test]
+fn disabled_exchange_rows_disappear_and_late_events_are_ignored_until_reenabled() {
+    let mut state = EngineState::new(Arc::new(sample_markets()));
+
+    state.ingest_event(
+        MarketEvent::Quote(quote(
+            Exchange::Lighter,
+            "BTC",
+            99.0,
+            2.0,
+            100.0,
+            2.0,
+            1_000,
+        )),
+        1_000,
+    );
+    state.ingest_event(
+        MarketEvent::Quote(quote(Exchange::Aster, "BTC", 101.0, 2.0, 101.3, 2.0, 1_000)),
+        1_000,
+    );
+    assert_eq!(state.ranked_snapshot(1_000, 2_500).len(), 2);
+
+    state.ingest_event(MarketEvent::ExchangeDisabled(Exchange::Aster), 1_010);
+    assert!(state.ranked_snapshot(1_010, 2_500).is_empty());
+
+    state.ingest_event(
+        MarketEvent::Quote(quote(Exchange::Aster, "BTC", 102.0, 2.0, 102.3, 2.0, 1_020)),
+        1_020,
+    );
+    assert!(state.ranked_snapshot(1_020, 2_500).is_empty());
+
+    state.ingest_event(MarketEvent::ExchangeEnabled(Exchange::Aster), 1_030);
+    state.ingest_event(
+        MarketEvent::Quote(quote(Exchange::Aster, "BTC", 102.0, 2.0, 102.3, 2.0, 1_040)),
+        1_040,
+    );
+
+    let rows = state.ranked_snapshot(1_040, 2_500);
+    assert_eq!(rows.len(), 2);
+    assert!(
+        rows.iter()
+            .all(|row| row.buy_ex == Exchange::Lighter || row.sell_ex == Exchange::Lighter)
+    );
+}
+
+#[test]
+fn disabling_one_exchange_preserves_routes_between_remaining_exchanges() {
+    let mut state = EngineState::new(Arc::new(three_way_markets()));
+
+    for (exchange, bid_px, ask_px) in [
+        (Exchange::Lighter, 99.4, 100.0),
+        (Exchange::Aster, 101.1, 101.4),
+        (Exchange::Extended, 100.6, 100.9),
+    ] {
+        state.ingest_event(
+            MarketEvent::Quote(quote(exchange, "BTC", bid_px, 2.0, ask_px, 2.0, 1_000)),
+            1_000,
+        );
+    }
+
+    assert_eq!(state.ranked_snapshot_all(1_000, 2_500).len(), 6);
+
+    state.ingest_event(MarketEvent::ExchangeDisabled(Exchange::Aster), 1_010);
+
+    let rows = state.ranked_snapshot_all(1_010, 2_500);
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|row| {
+        row.buy_ex != Exchange::Aster
+            && row.sell_ex != Exchange::Aster
+            && matches!(
+                (row.buy_ex, row.sell_ex),
+                (Exchange::Lighter, Exchange::Extended) | (Exchange::Extended, Exchange::Lighter)
+            )
+    }));
+}

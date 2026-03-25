@@ -11,6 +11,7 @@ use cross_ex_arb::engine;
 use cross_ex_arb::feeds;
 use cross_ex_arb::model::{
     ArbRow, Exchange, ExchangeFeedHealth, MarketEvent, NO_ROUTE_SELECTED, RouteHistorySnapshot,
+    SharedExchangeConnectionStates, initial_exchange_connection_states, now_ms,
 };
 use cross_ex_arb::ui::ArbApp;
 use tokio::runtime::Builder;
@@ -70,6 +71,8 @@ fn log_discovery_summary(discovery_result: &DiscoveryResult) {
     tracing::info!(
         lighter = discovery_result.lighter_count,
         aster = discovery_result.aster_count,
+        binance = discovery_result.binance_count,
+        bybit = discovery_result.bybit_count,
         extended = discovery_result.extended_count,
         edge_x = discovery_result.edge_x_count,
         hyperliquid = discovery_result.hyperliquid_count,
@@ -89,6 +92,8 @@ fn run_ui_mode(
     let snapshot: Arc<RwLock<Vec<ArbRow>>> = Arc::new(RwLock::new(Vec::new()));
     let exchange_health: Arc<RwLock<HashMap<Exchange, ExchangeFeedHealth>>> =
         Arc::new(RwLock::new(HashMap::new()));
+    let connection_states: SharedExchangeConnectionStates =
+        Arc::new(RwLock::new(initial_exchange_connection_states(now_ms())));
     let selected_route_id = Arc::new(AtomicU32::new(NO_ROUTE_SELECTED));
     let detail_snapshot: Arc<RwLock<Option<RouteHistorySnapshot>>> = Arc::new(RwLock::new(None));
     let (event_tx, event_rx) = mpsc::channel::<MarketEvent>(config.quote_channel_capacity);
@@ -114,12 +119,14 @@ fn run_ui_mode(
         });
     }
 
-    feeds::spawn_all_feeds(
+    let feed_supervisor = feeds::FeedSupervisor::new(
         runtime,
-        &config,
+        config.clone(),
         Arc::clone(&shared_markets),
         event_tx.clone(),
+        Arc::clone(&connection_states),
     );
+    feed_supervisor.start_all();
 
     if config.discovery_refresh_secs > 0 {
         let refresh_config = config.clone();
@@ -141,6 +148,8 @@ fn run_ui_mode(
             Ok(Box::new(ArbApp::new(
                 ui_snapshot,
                 ui_health,
+                Arc::clone(&connection_states),
+                Arc::clone(&feed_supervisor),
                 ui_selected_route_id,
                 ui_detail_snapshot,
                 ui_config,
@@ -179,6 +188,7 @@ fn run_collect_mode(
         data_root: config.collector_data_root.clone(),
         compression: config.collector_compression,
         bootstrap_timeout_ms: config.collector_bootstrap_timeout_ms,
+        bootstrap_buffer_events: config.collector_bootstrap_buffer_events,
         write_buffer: config.collector_write_buffer,
         flush_interval_ms: config.collector_flush_interval_ms,
         max_open_files: config.collector_max_open_files,

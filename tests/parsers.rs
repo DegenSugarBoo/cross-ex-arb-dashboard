@@ -1,10 +1,17 @@
 use std::collections::HashMap;
 
+use cross_ex_arb::discovery::SymbolMarkets;
 use cross_ex_arb::feeds::apex::{
-    ApexBookState, ApplyResult, apply_apex_delta, apply_apex_snapshot, best_quote_from_apex_state,
-    parse_apex_depth_event, parse_apex_instrument_info_message,
+    ApexBookState, ApplyResult, apex_symbol_map, apply_apex_delta, apply_apex_snapshot,
+    best_quote_from_apex_state, parse_apex_depth_event, parse_apex_instrument_info_message,
 };
 use cross_ex_arb::feeds::aster::{parse_book_ticker_message, parse_mark_price_message};
+use cross_ex_arb::feeds::binance::{
+    parse_binance_book_ticker_message, parse_binance_mark_price_message,
+};
+use cross_ex_arb::feeds::bybit::{
+    BybitTickerState, apply_bybit_ticker_patch, parse_bybit_ticker_message,
+};
 use cross_ex_arb::feeds::edge_x::{
     parse_edge_x_depth_message, parse_edge_x_ticker_funding_message,
 };
@@ -16,7 +23,7 @@ use cross_ex_arb::feeds::hyperliquid::{
     parse_hyperliquid_bbo_message, parse_hyperliquid_l2book_message,
 };
 use cross_ex_arb::feeds::lighter::{parse_market_stats_message, parse_ticker_message};
-use cross_ex_arb::model::Exchange;
+use cross_ex_arb::model::{Exchange, MarketMeta};
 use ordered_float::OrderedFloat;
 
 #[test]
@@ -69,6 +76,44 @@ fn parses_aster_mark_price_update() {
     assert_eq!(update.symbol_base, "BTC");
     assert!((update.funding_rate - (-0.00001411)).abs() < 1e-12);
     assert_eq!(update.next_funding_ts_ms, Some(1_700_006_400_000));
+}
+
+#[test]
+fn parses_binance_book_ticker_fixture() {
+    let payload = include_str!("../fixtures/binance_book_ticker.json");
+    let symbol_map = HashMap::from([("BTCUSDT".to_owned(), "BTC".to_owned())]);
+
+    let update = parse_binance_book_ticker_message(payload, &symbol_map, 1_700_000_000_999)
+        .expect("binance bookTicker");
+
+    assert_eq!(update.exchange, Exchange::Binance);
+    assert_eq!(update.symbol_base, "BTC");
+    assert!((update.bid_px - 101.0).abs() < 1e-9);
+    assert!((update.ask_px - 101.2).abs() < 1e-9);
+    assert_eq!(update.exch_ts_ms, 1_700_000_002_222);
+}
+
+#[test]
+fn parses_binance_mark_price_fixture() {
+    let payload = include_str!("../fixtures/binance_mark_price.json");
+    let symbol_map = HashMap::from([("BTCUSDT".to_owned(), "BTC".to_owned())]);
+
+    let update = parse_binance_mark_price_message(payload, &symbol_map, 1_700_000_009_999)
+        .expect("binance markPrice");
+
+    assert_eq!(update.exchange, Exchange::Binance);
+    assert_eq!(update.symbol_base, "BTC");
+    assert!((update.funding_rate - (-0.00001411)).abs() < 1e-12);
+    assert_eq!(update.next_funding_ts_ms, Some(1_700_006_400_000));
+}
+
+#[test]
+fn binance_ignores_irrelevant_frames() {
+    let ack = "{\"stream\":\"btcusdt@markPrice\",\"data\":{\"result\":null}}";
+    let symbol_map = HashMap::from([("BTCUSDT".to_owned(), "BTC".to_owned())]);
+
+    assert!(parse_binance_book_ticker_message(ack, &symbol_map, 0).is_none());
+    assert!(parse_binance_mark_price_message(ack, &symbol_map, 0).is_none());
 }
 
 #[test]
@@ -260,6 +305,99 @@ fn parses_hyperliquid_l2book_with_invalid_first_level() {
 }
 
 #[test]
+fn bybit_snapshot_emits_quote_and_funding() {
+    let payload = include_str!("../fixtures/bybit_ticker_snapshot.json");
+    let patch = parse_bybit_ticker_message(payload, 1_700_000_000_999).expect("bybit snapshot");
+    let mut state = BybitTickerState::default();
+
+    let (quote, funding) = apply_bybit_ticker_patch(&mut state, &patch, "BTC", 1_700_000_000_999);
+    let quote = quote.expect("bybit quote");
+    let funding = funding.expect("bybit funding");
+
+    assert_eq!(quote.exchange, Exchange::Bybit);
+    assert_eq!(quote.symbol_base, "BTC");
+    assert!((quote.bid_px - 100.10).abs() < 1e-9);
+    assert!((quote.ask_px - 100.30).abs() < 1e-9);
+
+    assert_eq!(funding.exchange, Exchange::Bybit);
+    assert_eq!(funding.symbol_base, "BTC");
+    assert!((funding.funding_rate - 0.00010).abs() < 1e-12);
+    assert_eq!(funding.next_funding_ts_ms, Some(1_700_003_600_000));
+}
+
+#[test]
+fn bybit_delta_quote_updates_cached_top_of_book() {
+    let snapshot = include_str!("../fixtures/bybit_ticker_snapshot.json");
+    let delta = include_str!("../fixtures/bybit_ticker_delta_quote.json");
+    let mut state = BybitTickerState::default();
+
+    let snapshot_patch =
+        parse_bybit_ticker_message(snapshot, 1_700_000_000_999).expect("bybit snapshot");
+    let _ = apply_bybit_ticker_patch(&mut state, &snapshot_patch, "BTC", 1_700_000_000_999);
+
+    let delta_patch = parse_bybit_ticker_message(delta, 1_700_000_005_999).expect("bybit delta");
+    let (quote, funding) =
+        apply_bybit_ticker_patch(&mut state, &delta_patch, "BTC", 1_700_000_005_999);
+    let quote = quote.expect("bybit quote delta");
+
+    assert_eq!(quote.exchange, Exchange::Bybit);
+    assert!((quote.bid_px - 100.20).abs() < 1e-9);
+    assert!((quote.ask_px - 100.40).abs() < 1e-9);
+    assert!(funding.is_none());
+}
+
+#[test]
+fn bybit_delta_funding_updates_cached_funding_only() {
+    let snapshot = include_str!("../fixtures/bybit_ticker_snapshot.json");
+    let delta = include_str!("../fixtures/bybit_ticker_delta_funding.json");
+    let mut state = BybitTickerState::default();
+
+    let snapshot_patch =
+        parse_bybit_ticker_message(snapshot, 1_700_000_000_999).expect("bybit snapshot");
+    let _ = apply_bybit_ticker_patch(&mut state, &snapshot_patch, "BTC", 1_700_000_000_999);
+
+    let delta_patch = parse_bybit_ticker_message(delta, 1_700_000_010_999).expect("bybit delta");
+    let (quote, funding) =
+        apply_bybit_ticker_patch(&mut state, &delta_patch, "BTC", 1_700_000_010_999);
+    let funding = funding.expect("bybit funding delta");
+
+    assert!(quote.is_none());
+    assert_eq!(funding.exchange, Exchange::Bybit);
+    assert!((funding.funding_rate - 0.00012).abs() < 1e-12);
+    assert_eq!(funding.next_funding_ts_ms, Some(1_700_007_200_000));
+}
+
+#[test]
+fn bybit_delta_before_snapshot_is_incomplete() {
+    let delta = r#"{
+        "topic": "tickers.BTCUSDT",
+        "type": "delta",
+        "ts": 1700000005000,
+        "data": {
+            "symbol": "BTCUSDT",
+            "bid1Price": "100.20",
+            "bid1Size": "2.00"
+        }
+    }"#;
+    let mut state = BybitTickerState::default();
+
+    let patch = parse_bybit_ticker_message(delta, 1_700_000_005_999).expect("bybit delta");
+    let (quote, funding) = apply_bybit_ticker_patch(&mut state, &patch, "BTC", 1_700_000_005_999);
+
+    assert!(quote.is_none());
+    assert!(funding.is_none());
+}
+
+#[test]
+fn bybit_ignores_non_market_frames() {
+    let ack = include_str!("../fixtures/bybit_ticker_subscribe_ack.json");
+    let pong = include_str!("../fixtures/bybit_pong.json");
+
+    assert!(parse_bybit_ticker_message(ack, 1_700_000_005_999).is_none());
+    assert!(parse_bybit_ticker_message(pong, 1_700_000_005_999).is_none());
+}
+
+#[test]
 fn parses_hyperliquid_bbo_message() {
     let payload = r#"{
         "channel":"bbo",
@@ -411,4 +549,37 @@ fn apex_funding_parser_maps_fields() {
     assert!((update.funding_rate - (-0.000031)).abs() < 1e-12);
     assert_eq!(update.next_funding_ts_ms, Some(1_700_006_400_000));
     assert_eq!(update.recv_ts_ms, 1_700_000_041_000);
+}
+
+#[test]
+fn apex_symbol_map_resolves_hyphenated_ws_symbols() {
+    let mut markets = SymbolMarkets::new();
+    markets.insert(
+        "BTC".to_owned(),
+        vec![MarketMeta {
+            exchange: Exchange::ApeX,
+            symbol_base: "BTC".to_owned(),
+            exchange_symbol: "BTC-USDT".to_owned(),
+            market_id: None,
+            taker_fee_pct: 0.05,
+            maker_fee_pct: 0.0,
+        }],
+    );
+
+    let symbol_map = apex_symbol_map(&markets);
+    let payload = r#"{
+        "topic":"instrumentInfo.H.BTC-USDT",
+        "data":{
+            "s":"BTC-USDT",
+            "fundingRate":"-0.000031",
+            "nextFundingTime":"1700006400000000",
+            "ts":"1700000041000"
+        }
+    }"#;
+
+    let update = parse_apex_instrument_info_message(payload, &symbol_map, 1_700_000_041_999)
+        .expect("apex funding parse with ws symbol");
+
+    assert_eq!(update.exchange, Exchange::ApeX);
+    assert_eq!(update.symbol_base, "BTC");
 }

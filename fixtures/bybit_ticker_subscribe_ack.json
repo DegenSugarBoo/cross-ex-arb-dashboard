@@ -1,0 +1,7 @@
+{
+  "success": true,
+  "ret_msg": "subscribe success",
+  "conn_id": "test-conn-id",
+  "req_id": 1,
+  "op": "subscribe"
+}

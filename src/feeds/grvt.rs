@@ -6,8 +6,10 @@ use anyhow::Context;
 use fastwebsockets::{Frame, OpCode};
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
-use tokio::runtime::Runtime;
+use tokio::runtime::Handle;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 use crate::config::AppConfig;
 use crate::discovery::{SymbolMarkets, normalize_base};
@@ -24,18 +26,27 @@ impl ExchangeFeed for GrvtFeed {
 
     fn spawn(
         &self,
-        runtime: &Runtime,
+        runtime: &Handle,
         config: &AppConfig,
         markets: Arc<SymbolMarkets>,
         event_tx: mpsc::Sender<MarketEvent>,
-    ) {
+        cancel_token: CancellationToken,
+    ) -> Vec<JoinHandle<()>> {
         let ws_url = config.grvt_ws_url.clone();
         let feed_markets = Arc::clone(&markets);
-        runtime.spawn(async move {
-            if let Err(err) = run_grvt_feed(&ws_url, &feed_markets, event_tx).await {
-                tracing::error!(error = %err, "grvt feed task terminated");
+        let task = runtime.spawn(async move {
+            tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    tracing::info!("grvt feed task cancelled");
+                }
+                result = run_grvt_feed(&ws_url, &feed_markets, event_tx) => {
+                    if let Err(err) = result {
+                        tracing::error!(error = %err, "grvt feed task terminated");
+                    }
+                }
             }
         });
+        vec![task]
     }
 }
 

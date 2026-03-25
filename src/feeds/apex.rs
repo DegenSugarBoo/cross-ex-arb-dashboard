@@ -7,8 +7,10 @@ use fastwebsockets::{Frame, OpCode};
 use ordered_float::OrderedFloat;
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
-use tokio::runtime::Runtime;
+use tokio::runtime::Handle;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 use crate::config::AppConfig;
 use crate::discovery::{SymbolMarkets, normalize_base};
@@ -28,28 +30,35 @@ impl ExchangeFeed for ApexFeed {
 
     fn spawn(
         &self,
-        runtime: &Runtime,
+        runtime: &Handle,
         config: &AppConfig,
         markets: Arc<SymbolMarkets>,
         event_tx: mpsc::Sender<MarketEvent>,
-    ) {
+        cancel_token: CancellationToken,
+    ) -> Vec<JoinHandle<()>> {
         let ws_url = config.apex_ws_url.clone();
         let depth_rest_url = config.apex_depth_rest_url.clone();
         let timeout_secs = config.http_timeout_secs;
         let feed_markets = Arc::clone(&markets);
-        runtime.spawn(async move {
-            if let Err(err) = run_apex_feed(
-                &ws_url,
-                &depth_rest_url,
-                &feed_markets,
-                timeout_secs,
-                event_tx,
-            )
-            .await
-            {
-                tracing::error!(error = %err, "apex feed task terminated");
+        let task = runtime.spawn(async move {
+            tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    tracing::info!("apex feed task cancelled");
+                }
+                result = run_apex_feed(
+                    &ws_url,
+                    &depth_rest_url,
+                    &feed_markets,
+                    timeout_secs,
+                    event_tx,
+                ) => {
+                    if let Err(err) = result {
+                        tracing::error!(error = %err, "apex feed task terminated");
+                    }
+                }
             }
         });
+        vec![task]
     }
 }
 
@@ -274,6 +283,19 @@ fn parse_depth_levels_from_fast(levels: &[Vec<NumOrString>]) -> Vec<(f64, f64)> 
         .collect()
 }
 
+fn compact_apex_rest_symbol(symbol: &str) -> String {
+    let upper = normalize_base(symbol);
+    for quote in ["USDT", "USD"] {
+        for separator in ["-", "_", "/"] {
+            let suffix = format!("{separator}{quote}");
+            if let Some(base) = upper.strip_suffix(&suffix) {
+                return format!("{base}{quote}");
+            }
+        }
+    }
+    upper
+}
+
 pub fn apex_symbol_map(markets: &SymbolMarkets) -> HashMap<String, String> {
     let mut map = HashMap::new();
     for (symbol_base, per_exchange) in markets {
@@ -283,6 +305,10 @@ pub fn apex_symbol_map(markets: &SymbolMarkets) -> HashMap<String, String> {
         {
             map.insert(meta.exchange_symbol.clone(), symbol_base.clone());
             map.insert(normalize_base(&meta.exchange_symbol), symbol_base.clone());
+            map.insert(
+                compact_apex_rest_symbol(&meta.exchange_symbol),
+                symbol_base.clone(),
+            );
         }
     }
     map
@@ -312,7 +338,11 @@ fn resolve_symbol_base(
     }
 
     let normalized = normalize_base(exchange_symbol);
-    symbol_map.get(&normalized).cloned()
+    symbol_map.get(&normalized).cloned().or_else(|| {
+        symbol_map
+            .get(&compact_apex_rest_symbol(exchange_symbol))
+            .cloned()
+    })
 }
 
 pub fn apex_depth_subscribe_payload(symbol: &str) -> String {
@@ -603,7 +633,10 @@ pub async fn resync_apex_symbol_depth(
 ) -> anyhow::Result<()> {
     let response = client
         .get(depth_rest_url)
-        .query(&[("symbol", symbol), ("limit", "200")])
+        .query(&[
+            ("symbol", compact_apex_rest_symbol(symbol)),
+            ("limit", "200".to_owned()),
+        ])
         .send()
         .await
         .context("apex depth resync request failed")?

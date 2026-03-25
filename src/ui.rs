@@ -11,8 +11,10 @@ use egui_plot::{CoordinatesFormatter, Corner, Line, Plot, PlotPoints};
 use sysinfo::{Pid, ProcessesToUpdate, System};
 
 use crate::config::AppConfig;
+use crate::feeds::FeedSupervisorHandle;
 use crate::model::{
-    ArbRow, Exchange, ExchangeFeedHealth, NO_ROUTE_SELECTED, RouteHistorySnapshot, now_ms,
+    ArbRow, Exchange, ExchangeFeedHealth, NO_ROUTE_SELECTED, RouteHistorySnapshot,
+    SharedExchangeConnectionStates, now_ms,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,6 +36,8 @@ enum SortColumn {
 pub struct ArbApp {
     snapshot: Arc<RwLock<Vec<ArbRow>>>,
     exchange_health: Arc<RwLock<HashMap<Exchange, ExchangeFeedHealth>>>,
+    connection_states: SharedExchangeConnectionStates,
+    feed_supervisor: Option<FeedSupervisorHandle>,
     selected_route_id: Arc<AtomicU32>,
     detail_snapshot: Arc<RwLock<Option<RouteHistorySnapshot>>>,
     frame_delay: Duration,
@@ -66,6 +70,8 @@ impl ArbApp {
     pub fn new(
         snapshot: Arc<RwLock<Vec<ArbRow>>>,
         exchange_health: Arc<RwLock<HashMap<Exchange, ExchangeFeedHealth>>>,
+        connection_states: SharedExchangeConnectionStates,
+        feed_supervisor: FeedSupervisorHandle,
         selected_route_id: Arc<AtomicU32>,
         detail_snapshot: Arc<RwLock<Option<RouteHistorySnapshot>>>,
         config: AppConfig,
@@ -85,6 +91,8 @@ impl ArbApp {
         Self {
             snapshot,
             exchange_health,
+            connection_states,
+            feed_supervisor: Some(feed_supervisor),
             selected_route_id,
             detail_snapshot,
             frame_delay: Duration::from_millis((1000 / fps) as u64),
@@ -587,11 +595,22 @@ impl eframe::App for ArbApp {
                 Ok(g) => g,
                 Err(poisoned) => poisoned.into_inner(),
             };
+            let connection_guard = match self.connection_states.read() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            let operator_states: HashMap<Exchange, bool> = connection_guard
+                .iter()
+                .map(|(exchange, state)| (*exchange, state.enabled))
+                .collect();
+            drop(connection_guard);
             ui.scope(|ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(4.0, 3.0);
                 ui.horizontal_wrapped(|ui| {
                     for exchange in Exchange::all() {
                         let health = health_guard.get(exchange);
+                        let operator_enabled =
+                            operator_states.get(exchange).copied().unwrap_or(true);
                         let dot_color = if exchange_is_live(health, frame_now_ms) {
                             POSITIVE_COLOR
                         } else {
@@ -631,8 +650,33 @@ impl eframe::App for ArbApp {
                                             )
                                             .sense(egui::Sense::click()),
                                         );
+                                        let button_response = ui.add(
+                                            egui::Button::new(
+                                                egui::RichText::new(if operator_enabled {
+                                                    "On"
+                                                } else {
+                                                    "Off"
+                                                })
+                                                .color(Color32::WHITE),
+                                            )
+                                            .fill(if operator_enabled {
+                                                POSITIVE_COLOR
+                                            } else {
+                                                NEGATIVE_COLOR
+                                            })
+                                            .min_size(egui::vec2(30.0, 18.0)),
+                                        );
                                         if name_response.clicked() || dot_response.clicked() {
                                             state.toggle(ui);
+                                        }
+                                        if button_response.clicked() {
+                                            if let Some(supervisor) = &self.feed_supervisor {
+                                                if operator_enabled {
+                                                    let _ = supervisor.disable(*exchange);
+                                                } else {
+                                                    let _ = supervisor.enable(*exchange);
+                                                }
+                                            }
                                         }
                                     });
 
@@ -897,6 +941,8 @@ mod tests {
         ArbApp {
             snapshot: Arc::new(RwLock::new(Vec::new())),
             exchange_health: Arc::new(RwLock::new(HashMap::<Exchange, ExchangeFeedHealth>::new())),
+            connection_states: Arc::new(RwLock::new(HashMap::new())),
+            feed_supervisor: None,
             selected_route_id: Arc::new(AtomicU32::new(NO_ROUTE_SELECTED)),
             detail_snapshot: Arc::new(RwLock::new(None)),
             frame_delay: Duration::from_millis(16),

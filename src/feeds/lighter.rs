@@ -5,8 +5,10 @@ use std::time::Duration;
 use anyhow::Context;
 use fastwebsockets::{Frame, OpCode};
 use serde::Deserialize;
-use tokio::runtime::Runtime;
+use tokio::runtime::Handle;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 use crate::config::AppConfig;
 use crate::discovery::{SymbolMarkets, normalize_base};
@@ -26,39 +28,58 @@ impl ExchangeFeed for LighterFeed {
 
     fn spawn(
         &self,
-        runtime: &Runtime,
+        runtime: &Handle,
         config: &AppConfig,
         markets: Arc<SymbolMarkets>,
         event_tx: mpsc::Sender<MarketEvent>,
-    ) {
+        cancel_token: CancellationToken,
+    ) -> Vec<JoinHandle<()>> {
         let ws_url = config.lighter_ws_url.clone();
         let feed_markets = Arc::clone(&markets);
         let quote_event_tx = event_tx.clone();
-        runtime.spawn(async move {
-            if let Err(err) = run_lighter_feed(&ws_url, &feed_markets, quote_event_tx).await {
-                tracing::error!(error = %err, "lighter feed task terminated");
+        let quote_cancel = cancel_token.clone();
+        let quote_task = runtime.spawn(async move {
+            tokio::select! {
+                _ = quote_cancel.cancelled() => {
+                    tracing::info!("lighter feed task cancelled");
+                }
+                result = run_lighter_feed(&ws_url, &feed_markets, quote_event_tx) => {
+                    if let Err(err) = result {
+                        tracing::error!(error = %err, "lighter feed task terminated");
+                    }
+                }
             }
         });
+        let mut handles = vec![quote_task];
 
         if config.funding_poll_secs > 0 {
             let funding_url = config.lighter_funding_rest_url.clone();
             let poll_secs = config.funding_poll_secs;
             let timeout_secs = config.http_timeout_secs;
             let funding_markets = Arc::clone(&markets);
-            runtime.spawn(async move {
-                if let Err(err) = run_lighter_funding_poller(
-                    &funding_url,
-                    &funding_markets,
-                    poll_secs,
-                    timeout_secs,
-                    event_tx,
-                )
-                .await
-                {
-                    tracing::error!(error = %err, "lighter funding poller terminated");
+            let funding_cancel = cancel_token;
+            let funding_task = runtime.spawn(async move {
+                tokio::select! {
+                    _ = funding_cancel.cancelled() => {
+                        tracing::info!("lighter funding poller cancelled");
+                    }
+                    result = run_lighter_funding_poller(
+                        &funding_url,
+                        &funding_markets,
+                        poll_secs,
+                        timeout_secs,
+                        event_tx,
+                    ) => {
+                        if let Err(err) = result {
+                            tracing::error!(error = %err, "lighter funding poller terminated");
+                        }
+                    }
                 }
             });
+            handles.push(funding_task);
         }
+
+        handles
     }
 }
 

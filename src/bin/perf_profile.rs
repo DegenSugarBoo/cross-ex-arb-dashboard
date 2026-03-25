@@ -12,6 +12,12 @@ use cross_ex_arb::feeds::apex::{
     parse_apex_instrument_info_message,
 };
 use cross_ex_arb::feeds::aster::{parse_book_ticker_message, parse_mark_price_message};
+use cross_ex_arb::feeds::binance::{
+    parse_binance_book_ticker_message, parse_binance_mark_price_message,
+};
+use cross_ex_arb::feeds::bybit::{
+    BybitTickerState, apply_bybit_ticker_patch, parse_bybit_ticker_message,
+};
 use cross_ex_arb::feeds::edge_x::{
     parse_edge_x_depth_message, parse_edge_x_depth_message_fallback,
     parse_edge_x_depth_message_fast, parse_edge_x_ticker_funding_message,
@@ -47,6 +53,11 @@ const LIGHTER_STATS: &str = r#"{
 }"#;
 const ASTER_BOOK: &str = r#"{"e":"bookTicker","s":"BTCUSDT","b":"101.0","B":"1.50","a":"101.2","A":"0.80","T":1700000001111,"E":1700000002222}"#;
 const ASTER_MARK: &str = r#"{"e":"markPriceUpdate","E":1700000010000,"s":"BTCUSDT","r":"-0.00001411","T":1700006400000}"#;
+const BINANCE_BOOK: &str = r#"{"stream":"btcusdt@bookTicker","data":{"e":"bookTicker","E":1700000002222,"s":"BTCUSDT","b":"101.0","B":"1.50","a":"101.2","A":"0.80","T":1700000001111}}"#;
+const BINANCE_MARK: &str = r#"{"stream":"btcusdt@markPrice","data":{"e":"markPriceUpdate","E":1700000010000,"s":"BTCUSDT","p":"101.1","r":"-0.00001411","T":1700006400000}}"#;
+const BYBIT_SNAPSHOT: &str = r#"{"topic":"tickers.BTCUSDT","type":"snapshot","ts":1700000000000,"data":{"symbol":"BTCUSDT","bid1Price":"100.10","bid1Size":"2.50","ask1Price":"100.30","ask1Size":"1.75","fundingRate":"0.00010","nextFundingTime":1700003600000}}"#;
+const BYBIT_DELTA_QUOTE: &str = r#"{"topic":"tickers.BTCUSDT","type":"delta","ts":1700000005000,"data":{"symbol":"BTCUSDT","bid1Price":"100.20","bid1Size":"2.00","ask1Price":"100.40","ask1Size":"1.50"}}"#;
+const BYBIT_DELTA_FUNDING: &str = r#"{"topic":"tickers.BTCUSDT","type":"delta","ts":1700000010000,"data":{"symbol":"BTCUSDT","fundingRate":"0.00012","nextFundingTime":1700007200000}}"#;
 const EXTENDED_BOOK: &str = r#"{
     "timestamp":1700000000123,
     "data":{
@@ -235,6 +246,22 @@ fn make_markets(symbol_count: usize) -> SymbolMarkets {
                     taker_fee_pct: 0.05,
                     maker_fee_pct: 0.0,
                 },
+                MarketMeta {
+                    exchange: Exchange::Binance,
+                    symbol_base: symbol.clone(),
+                    exchange_symbol: format!("{symbol}USDT"),
+                    market_id: None,
+                    taker_fee_pct: 0.04,
+                    maker_fee_pct: 0.0,
+                },
+                MarketMeta {
+                    exchange: Exchange::Bybit,
+                    symbol_base: symbol.clone(),
+                    exchange_symbol: format!("{symbol}USDT"),
+                    market_id: None,
+                    taker_fee_pct: 0.04,
+                    maker_fee_pct: 0.0,
+                },
             ],
         );
     }
@@ -250,6 +277,8 @@ fn make_quote(exchange: Exchange, symbol: &str, offset: f64, recv_ts_ms: i64) ->
         Exchange::Hyperliquid => (100.35 + offset, 100.47 + offset),
         Exchange::Grvt => (100.28 + offset, 100.38 + offset),
         Exchange::ApeX => (100.22 + offset, 100.33 + offset),
+        Exchange::Binance => (100.18 + offset, 100.29 + offset),
+        Exchange::Bybit => (100.14 + offset, 100.26 + offset),
     };
 
     QuoteUpdate {
@@ -383,6 +412,8 @@ fn benchmark_runtime_engine(symbol_count: usize, rounds: usize) {
         let config = AppConfig {
             lighter_rest_url: String::new(),
             aster_rest_url: String::new(),
+            binance_rest_url: String::new(),
+            bybit_rest_url: String::new(),
             extended_rest_url: String::new(),
             edge_x_rest_url: String::new(),
             hyperliquid_rest_url: String::new(),
@@ -390,6 +421,8 @@ fn benchmark_runtime_engine(symbol_count: usize, rounds: usize) {
             apex_rest_url: String::new(),
             lighter_ws_url: String::new(),
             aster_ws_url: String::new(),
+            binance_ws_url: String::new(),
+            bybit_ws_url: String::new(),
             extended_ws_url: String::new(),
             edge_x_ws_url: String::new(),
             hyperliquid_ws_url: String::new(),
@@ -411,6 +444,7 @@ fn benchmark_runtime_engine(symbol_count: usize, rounds: usize) {
             collector_data_root: std::path::PathBuf::from("data"),
             collector_compression: CollectorCompression::Zstd,
             collector_bootstrap_timeout_ms: 45_000,
+            collector_bootstrap_buffer_events: 131_072,
             collector_write_buffer: 16_384,
             collector_flush_interval_ms: 1_000,
             collector_max_open_files: 512,
@@ -474,11 +508,21 @@ fn main() {
     println!("== Parser Throughput ==");
     let lighter_market_map = HashMap::from([(1_u32, "BTC".to_owned())]);
     let aster_symbol_map = HashMap::from([("BTCUSDT".to_owned(), "BTC".to_owned())]);
+    let binance_symbol_map = HashMap::from([("BTCUSDT".to_owned(), "BTC".to_owned())]);
     let extended_symbol_map = HashMap::from([("BTC-USD".to_owned(), "BTC".to_owned())]);
     let edge_market_map = HashMap::from([(101_u32, "BTC".to_owned())]);
     let hyper_symbol_map = HashMap::from([("BTC".to_owned(), "BTC".to_owned())]);
     let grvt_symbol_map = HashMap::from([("BTC_USDT_Perp".to_owned(), "BTC".to_owned())]);
     let apex_symbol_map = HashMap::from([("BTCUSDT".to_owned(), "BTC".to_owned())]);
+    let bybit_snapshot_patch =
+        parse_bybit_ticker_message(BYBIT_SNAPSHOT, 1_700_000_000_999).expect("bybit snapshot");
+    let mut bybit_seed_state = BybitTickerState::default();
+    let _ = apply_bybit_ticker_patch(
+        &mut bybit_seed_state,
+        &bybit_snapshot_patch,
+        "BTC",
+        1_700_000_000_999,
+    );
 
     bench_parse("lighter ticker", parse_iterations, |recv_ts_ms| {
         parse_ticker_message(LIGHTER_TICKER, &lighter_market_map, recv_ts_ms).is_some()
@@ -496,6 +540,45 @@ fn main() {
     bench_parse("aster markPrice", parse_iterations, |recv_ts_ms| {
         parse_mark_price_message(ASTER_MARK, &aster_symbol_map, recv_ts_ms).is_some()
     });
+    bench_parse("binance bookTicker", parse_iterations, |recv_ts_ms| {
+        parse_binance_book_ticker_message(BINANCE_BOOK, &binance_symbol_map, recv_ts_ms).is_some()
+    });
+    bench_parse("binance markPrice", parse_iterations, |recv_ts_ms| {
+        parse_binance_mark_price_message(BINANCE_MARK, &binance_symbol_map, recv_ts_ms).is_some()
+    });
+    bench_parse("bybit ticker snapshot", parse_iterations, |recv_ts_ms| {
+        parse_bybit_ticker_message(BYBIT_SNAPSHOT, recv_ts_ms)
+            .map(|patch| {
+                let mut state = BybitTickerState::default();
+                let (quote, funding) =
+                    apply_bybit_ticker_patch(&mut state, &patch, "BTC", recv_ts_ms);
+                quote.is_some() || funding.is_some()
+            })
+            .unwrap_or(false)
+    });
+    bench_parse("bybit ticker delta quote", parse_iterations, |recv_ts_ms| {
+        parse_bybit_ticker_message(BYBIT_DELTA_QUOTE, recv_ts_ms)
+            .map(|patch| {
+                let mut state = bybit_seed_state.clone();
+                let (quote, _) = apply_bybit_ticker_patch(&mut state, &patch, "BTC", recv_ts_ms);
+                quote.is_some()
+            })
+            .unwrap_or(false)
+    });
+    bench_parse(
+        "bybit ticker delta funding",
+        parse_iterations,
+        |recv_ts_ms| {
+            parse_bybit_ticker_message(BYBIT_DELTA_FUNDING, recv_ts_ms)
+                .map(|patch| {
+                    let mut state = bybit_seed_state.clone();
+                    let (_, funding) =
+                        apply_bybit_ticker_patch(&mut state, &patch, "BTC", recv_ts_ms);
+                    funding.is_some()
+                })
+                .unwrap_or(false)
+        },
+    );
     bench_parse("extended orderbook", parse_iterations, |recv_ts_ms| {
         parse_extended_orderbook_message(EXTENDED_BOOK, &extended_symbol_map, recv_ts_ms).is_some()
     });

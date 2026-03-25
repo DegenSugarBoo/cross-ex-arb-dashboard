@@ -91,6 +91,7 @@ pub struct CollectorSettings {
     pub data_root: PathBuf,
     pub compression: CollectorCompression,
     pub bootstrap_timeout_ms: u64,
+    pub bootstrap_buffer_events: usize,
     pub write_buffer: usize,
     pub flush_interval_ms: u64,
     pub max_open_files: usize,
@@ -422,28 +423,43 @@ impl CollectorService {
         let exchange = match &event {
             MarketEvent::Quote(update) => update.exchange,
             MarketEvent::Funding(update) => update.exchange,
+            MarketEvent::ExchangeEnabled(_) | MarketEvent::ExchangeDisabled(_) => return Ok(()),
         };
         self.bootstrap_gate.mark_ready(exchange);
-        self.push_pre_gate_event(event);
+        let opened_by_buffer_pressure = self.push_pre_gate_event(event);
 
         if self.bootstrap_gate.is_open() {
-            self.on_gate_open("all expected exchanges observed first event")?;
+            let reason = if opened_by_buffer_pressure {
+                "bootstrap buffer capacity reached"
+            } else {
+                "all expected exchanges observed first event"
+            };
+            self.on_gate_open(reason)?;
         }
 
         Ok(())
     }
 
-    fn push_pre_gate_event(&mut self, event: MarketEvent) {
-        let cap = self.settings.write_buffer.max(1);
-        if self.pre_gate_buffer.len() >= cap {
-            let _ = self.pre_gate_buffer.pop_front();
-            self.stats.dropped_records = self.stats.dropped_records.saturating_add(1);
+    fn push_pre_gate_event(&mut self, event: MarketEvent) -> bool {
+        let cap = self.settings.bootstrap_buffer_events.max(1);
+        self.pre_gate_buffer.push_back(event);
+
+        if self.pre_gate_buffer.len() > cap && self.bootstrap_gate.force_open() {
+            let missing = self
+                .bootstrap_gate
+                .missing_exchanges()
+                .into_iter()
+                .map(|exchange| exchange.as_str().to_owned())
+                .collect::<Vec<_>>();
             tracing::warn!(
                 cap,
-                "collector bootstrap buffer overflow, dropping oldest event"
+                buffered = self.pre_gate_buffer.len(),
+                missing = ?missing,
+                "collector bootstrap buffer capacity reached; opening gate early"
             );
+            return true;
         }
-        self.pre_gate_buffer.push_back(event);
+        false
     }
 
     fn on_periodic_tick(&mut self) -> Result<()> {
@@ -464,6 +480,7 @@ impl CollectorService {
             tracing::info!(
                 gate_open = self.bootstrap_gate.is_open(),
                 pre_gate_buffer_len = self.pre_gate_buffer.len(),
+                missing = ?self.bootstrap_gate.missing_exchanges().into_iter().map(|exchange| exchange.as_str().to_owned()).collect::<Vec<_>>(),
                 open_writers = self.writers.len(),
                 written_records = self.stats.written_records,
                 dropped_records = self.stats.dropped_records,
@@ -578,6 +595,7 @@ impl CollectorService {
                     next_funding_ts_ms: update.next_funding_ts_ms,
                 },
             },
+            MarketEvent::ExchangeEnabled(_) | MarketEvent::ExchangeDisabled(_) => return Ok(()),
         };
         self.write_envelope(envelope)
     }
@@ -906,6 +924,7 @@ mod tests {
             data_root: tmp.to_path_buf(),
             compression: CollectorCompression::None,
             bootstrap_timeout_ms: 1_000,
+            bootstrap_buffer_events: 8_192,
             write_buffer: 8_192,
             flush_interval_ms: 10,
             max_open_files: 32,

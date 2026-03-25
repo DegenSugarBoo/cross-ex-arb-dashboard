@@ -5,8 +5,10 @@ use std::time::Duration;
 use anyhow::Context;
 use fastwebsockets::OpCode;
 use serde_json::Value;
-use tokio::runtime::Runtime;
+use tokio::runtime::Handle;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 use crate::config::AppConfig;
 use crate::discovery::{SymbolMarkets, normalize_base};
@@ -30,31 +32,50 @@ impl ExchangeFeed for ExtendedFeed {
 
     fn spawn(
         &self,
-        runtime: &Runtime,
+        runtime: &Handle,
         config: &AppConfig,
         markets: Arc<SymbolMarkets>,
         event_tx: mpsc::Sender<MarketEvent>,
-    ) {
+        cancel_token: CancellationToken,
+    ) -> Vec<JoinHandle<()>> {
         let ws_url = config.extended_ws_url.clone();
         let feed_markets = Arc::clone(&markets);
         let quote_event_tx = event_tx.clone();
-        runtime.spawn(async move {
-            if let Err(err) = run_extended_feed(&ws_url, &feed_markets, quote_event_tx).await {
-                tracing::error!(error = %err, "extended feed task terminated");
+        let quote_cancel = cancel_token.clone();
+        let quote_task = runtime.spawn(async move {
+            tokio::select! {
+                _ = quote_cancel.cancelled() => {
+                    tracing::info!("extended feed task cancelled");
+                }
+                result = run_extended_feed(&ws_url, &feed_markets, quote_event_tx) => {
+                    if let Err(err) = result {
+                        tracing::error!(error = %err, "extended feed task terminated");
+                    }
+                }
             }
         });
+        let mut handles = vec![quote_task];
 
         if config.funding_poll_secs > 0 {
             let funding_ws_url = config.extended_funding_ws_url.clone();
             let funding_markets = Arc::clone(&markets);
-            runtime.spawn(async move {
-                if let Err(err) =
-                    run_extended_funding_feed(&funding_ws_url, &funding_markets, event_tx).await
-                {
-                    tracing::error!(error = %err, "extended funding feed task terminated");
+            let funding_cancel = cancel_token;
+            let funding_task = runtime.spawn(async move {
+                tokio::select! {
+                    _ = funding_cancel.cancelled() => {
+                        tracing::info!("extended funding feed task cancelled");
+                    }
+                    result = run_extended_funding_feed(&funding_ws_url, &funding_markets, event_tx) => {
+                        if let Err(err) = result {
+                            tracing::error!(error = %err, "extended funding feed task terminated");
+                        }
+                    }
                 }
             });
+            handles.push(funding_task);
         }
+
+        handles
     }
 }
 

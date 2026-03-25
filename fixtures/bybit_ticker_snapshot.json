@@ -1,0 +1,14 @@
+{
+  "topic": "tickers.BTCUSDT",
+  "type": "snapshot",
+  "ts": 1700000000000,
+  "data": {
+    "symbol": "BTCUSDT",
+    "bid1Price": "100.10",
+    "bid1Size": "2.50",
+    "ask1Price": "100.30",
+    "ask1Size": "1.75",
+    "fundingRate": "0.00010",
+    "nextFundingTime": 1700003600000
+  }
+}

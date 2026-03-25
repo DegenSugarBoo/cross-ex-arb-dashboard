@@ -1,13 +1,37 @@
 # cross-ex-arb
 
-`cross-ex-arb` is a latency-first Rust project for monitoring cross-exchange perpetual futures markets.
+`cross-ex-arb` is a Rust market-monitoring tool for cross-exchange perpetual futures arbitrage.
 
-It currently supports two runtime modes:
+It watches multiple perp venues in real time, normalizes quote and funding data into one shared model, and surfaces the best two-leg buy/sell routes in a desktop dashboard. The same feed stack can also run headless as a raw market-data collector for replay, benchmarking, and downstream research.
 
-- Scanner mode: launches an `egui` desktop app that ranks two-leg arbitrage routes across exchanges.
-- Collector mode: runs headless and writes normalized raw market events to disk for offline analysis and replay.
+The project is read-only. It does not place orders, manage positions, or execute trades.
 
-The project is read-only. It does not place orders.
+## Overview
+
+This repo is built for people who want to:
+
+- monitor live perp spreads across exchanges from one screen
+- compare quote, funding, and fee-adjusted net spread behavior
+- collect normalized raw exchange events to disk for offline analysis
+- benchmark parsers, websocket ingestion, and collector throughput
+
+Out of the box, the project supports two runtime modes:
+
+- Scanner mode: launches an `egui` desktop app that ranks live arbitrage routes.
+- Collector mode: runs headless and writes normalized raw events to partitioned files.
+
+## Why This Repo Exists
+
+Cross-exchange arbitrage data is messy: every venue exposes different symbols, websocket payloads, funding formats, and fee rules. `cross-ex-arb` handles that normalization layer so you can focus on observing spreads and evaluating market behavior instead of stitching feeds together by hand.
+
+At a high level, the pipeline is:
+
+1. Discover eligible perpetual markets on each supported exchange.
+2. Map symbols into a shared cross-venue market set.
+3. Stream quote and funding updates from websocket and REST-backed feeds.
+4. Normalize events into a common model.
+5. Rank live directed routes by raw and fee-adjusted spread.
+6. Optionally persist raw envelopes for replay and research.
 
 ## What It Does
 
@@ -24,6 +48,8 @@ The project is read-only. It does not place orders.
 | --- | --- | --- | --- | --- |
 | Lighter | REST `orderBooks` | WS `ticker/<market_id>` | REST `funding-rates` poller | Per-market `taker_fee` from discovery |
 | Aster | REST `exchangeInfo` | WS `<symbol>@bookTicker` | REST `premiumIndex` poller | Base taker fee `0.04%` |
+| Binance | REST `exchangeInfo` | WS `<symbol>@bookTicker` combined stream | WS `<symbol>@markPrice` combined stream | Base taker fee `0.04%` |
+| Bybit | REST `v5/market/instruments-info?category=linear` | WS `tickers.<symbol>` | WS `tickers.<symbol>` | Base taker fee `0.04%` |
 | Extended | REST `info/markets` with fallback symbol inference | WS orderbook stream | WS funding stream | Base taker fee `0.025%` |
 | edgeX | REST `meta/getMetaData` | WS `depth.<contractId>.15` | WS `ticker.<contractId>` | `takerFeeRate` from metadata when present, otherwise `0.038%` |
 | Hyperliquid | REST `POST /info` with `type=meta` | WS `bbo` | REST `POST /info` with `type=metaAndAssetCtxs` poller | Base taker fee `0.045%` |
@@ -187,7 +213,7 @@ Collector tuning:
 - `--collector-flush-interval-ms` default `1000`: periodic flush cadence
 - `--collector-max-open-files` default `128`: configured writer handle budget before eviction
 
-Endpoint overrides are available for every exchange feed via `--*-rest-url` and `--*-ws-url` flags, including `--extended-funding-ws-url` and `--apex-depth-rest-url`.
+Endpoint overrides are available for every exchange feed via `--*-rest-url` and `--*-ws-url` flags, including `--binance-rest-url`, `--binance-ws-url`, `--bybit-rest-url`, `--bybit-ws-url`, `--extended-funding-ws-url`, and `--apex-depth-rest-url`.
 
 ## Development And Validation
 

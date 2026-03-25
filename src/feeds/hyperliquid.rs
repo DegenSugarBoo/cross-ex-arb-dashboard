@@ -6,8 +6,10 @@ use anyhow::Context;
 use fastwebsockets::{Frame, OpCode};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
-use tokio::runtime::Runtime;
+use tokio::runtime::Handle;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 use crate::config::AppConfig;
 use crate::discovery::{SymbolMarkets, normalize_base};
@@ -18,7 +20,18 @@ use crate::feeds::{
 use crate::model::{Exchange, FundingUpdate, MarketEvent, QuoteUpdate, now_ms};
 use crate::ws_fast::connect_fast_websocket;
 
+const HYPERLIQUID_HEARTBEAT_SECS: u64 = 45;
+const HYPERLIQUID_SUBSCRIPTIONS_PER_CONNECTION: usize = 50;
+
 pub struct HyperliquidFeed;
+
+fn hyperliquid_ping_payload() -> &'static str {
+    "{\"method\":\"ping\"}"
+}
+
+fn pong_frame_for(frame: &Frame<'_>) -> Frame<'static> {
+    Frame::pong(frame.payload.to_vec().into())
+}
 
 impl ExchangeFeed for HyperliquidFeed {
     fn exchange(&self) -> Exchange {
@@ -27,39 +40,87 @@ impl ExchangeFeed for HyperliquidFeed {
 
     fn spawn(
         &self,
-        runtime: &Runtime,
+        runtime: &Handle,
         config: &AppConfig,
         markets: Arc<SymbolMarkets>,
         event_tx: mpsc::Sender<MarketEvent>,
-    ) {
+        cancel_token: CancellationToken,
+    ) -> Vec<JoinHandle<()>> {
         let ws_url = config.hyperliquid_ws_url.clone();
-        let feed_markets = Arc::clone(&markets);
-        let quote_event_tx = event_tx.clone();
-        runtime.spawn(async move {
-            if let Err(err) = run_hyperliquid_feed(&ws_url, &feed_markets, quote_event_tx).await {
-                tracing::error!(error = %err, "hyperliquid feed task terminated");
+        let quote_symbol_map = hyperliquid_symbol_map(&markets);
+        let shard_coins = hyperliquid_subscription_coins(&markets);
+        let mut quote_handles = Vec::new();
+
+        if shard_coins.is_empty() {
+            tracing::warn!("hyperliquid feed skipped: no matched symbols to subscribe");
+        } else {
+            for (shard_id, chunk) in shard_coins
+                .chunks(HYPERLIQUID_SUBSCRIPTIONS_PER_CONNECTION)
+                .enumerate()
+            {
+                let shard_symbol_map = quote_symbol_map.clone();
+                let shard_ws_url = ws_url.clone();
+                let shard_coins = chunk.to_vec();
+                tracing::info!(
+                    shard_id,
+                    subscriptions = shard_coins.len(),
+                    coins = ?shard_coins,
+                    "prepared hyperliquid shard"
+                );
+                let quote_event_tx = event_tx.clone();
+                let quote_cancel = cancel_token.clone();
+                let quote_task = runtime.spawn(async move {
+                    tokio::select! {
+                        _ = quote_cancel.cancelled() => {
+                            tracing::info!(shard_id, "hyperliquid feed task cancelled");
+                        }
+                        result = run_hyperliquid_feed(
+                            &shard_ws_url,
+                            &shard_symbol_map,
+                            shard_coins,
+                            shard_id,
+                            quote_event_tx,
+                        ) => {
+                            if let Err(err) = result {
+                                tracing::error!(error = %err, shard_id, "hyperliquid feed task terminated");
+                            }
+                        }
+                    }
+                });
+                quote_handles.push(quote_task);
             }
-        });
+        }
+
+        let mut handles = quote_handles;
 
         if config.funding_poll_secs > 0 {
             let funding_url = config.hyperliquid_funding_rest_url.clone();
             let poll_secs = config.funding_poll_secs;
             let timeout_secs = config.http_timeout_secs;
             let funding_markets = Arc::clone(&markets);
-            runtime.spawn(async move {
-                if let Err(err) = run_hyperliquid_funding_poller(
-                    &funding_url,
-                    &funding_markets,
-                    poll_secs,
-                    timeout_secs,
-                    event_tx,
-                )
-                .await
-                {
-                    tracing::error!(error = %err, "hyperliquid funding poller terminated");
+            let funding_cancel = cancel_token;
+            let funding_task = runtime.spawn(async move {
+                tokio::select! {
+                    _ = funding_cancel.cancelled() => {
+                        tracing::info!("hyperliquid funding poller cancelled");
+                    }
+                    result = run_hyperliquid_funding_poller(
+                        &funding_url,
+                        &funding_markets,
+                        poll_secs,
+                        timeout_secs,
+                        event_tx,
+                    ) => {
+                        if let Err(err) = result {
+                            tracing::error!(error = %err, "hyperliquid funding poller terminated");
+                        }
+                    }
                 }
             });
+            handles.push(funding_task);
         }
+
+        handles
     }
 }
 
@@ -207,15 +268,38 @@ pub fn parse_hyperliquid_bbo_message_fast(
 }
 
 fn hyperliquid_symbol_map(markets: &SymbolMarkets) -> HashMap<String, String> {
-    markets
-        .iter()
-        .filter_map(|(symbol_base, per_exchange)| {
+    let mut map = HashMap::new();
+
+    for (symbol_base, per_exchange) in markets {
+        let Some(meta) = per_exchange
+            .iter()
+            .find(|meta| meta.exchange == Exchange::Hyperliquid)
+        else {
+            continue;
+        };
+
+        map.insert(meta.exchange_symbol.clone(), symbol_base.clone());
+
+        let normalized = normalize_base(&meta.exchange_symbol);
+        map.entry(normalized).or_insert_with(|| symbol_base.clone());
+    }
+
+    map
+}
+
+fn hyperliquid_subscription_coins(markets: &SymbolMarkets) -> Vec<String> {
+    let mut coins: Vec<String> = markets
+        .values()
+        .filter_map(|per_exchange| {
             per_exchange
                 .iter()
                 .find(|meta| meta.exchange == Exchange::Hyperliquid)
-                .map(|meta| (normalize_base(&meta.exchange_symbol), symbol_base.clone()))
+                .map(|meta| meta.exchange_symbol.clone())
         })
-        .collect()
+        .collect();
+    coins.sort_unstable();
+    coins.dedup();
+    coins
 }
 
 fn resolve_symbol_base(symbol_map: &HashMap<String, String>, coin: &str) -> Option<String> {
@@ -397,12 +481,11 @@ pub fn parse_hyperliquid_l2book_message(
 
 pub async fn run_hyperliquid_feed(
     ws_url: &str,
-    markets: &SymbolMarkets,
+    symbol_map: &HashMap<String, String>,
+    coins: Vec<String>,
+    shard_id: usize,
     event_tx: mpsc::Sender<MarketEvent>,
 ) -> anyhow::Result<()> {
-    let symbol_map = hyperliquid_symbol_map(markets);
-    let coins: Vec<String> = symbol_map.keys().cloned().collect();
-
     if coins.is_empty() {
         tracing::warn!("hyperliquid feed skipped: no matched symbols to subscribe");
         return Ok(());
@@ -413,13 +496,14 @@ pub async fn run_hyperliquid_feed(
     loop {
         tracing::info!(
             attempt,
+            shard_id,
             subscriptions = coins.len(),
             "connecting hyperliquid WS"
         );
 
         match connect_fast_websocket(ws_url).await {
             Ok(mut ws) => {
-                tracing::info!("connected hyperliquid WS");
+                tracing::info!(shard_id, "connected hyperliquid WS");
                 attempt = 0;
 
                 let mut subscribe_failed = false;
@@ -437,14 +521,14 @@ pub async fn run_hyperliquid_feed(
                         .write_frame(Frame::text(payload.into_bytes().into()))
                         .await
                     {
-                        tracing::warn!(error = %err, coin, "hyperliquid subscribe failed");
+                        tracing::warn!(error = %err, coin, shard_id, "hyperliquid subscribe failed");
                         subscribe_failed = true;
                         break;
                     }
                 }
                 if !subscribe_failed {
                     if let Err(err) = ws.flush().await {
-                        tracing::warn!(error = %err, "hyperliquid subscribe flush failed");
+                        tracing::warn!(error = %err, shard_id, "hyperliquid subscribe flush failed");
                         subscribe_failed = true;
                     }
                 }
@@ -456,8 +540,40 @@ pub async fn run_hyperliquid_feed(
                     continue;
                 }
 
+                let mut heartbeat =
+                    tokio::time::interval(Duration::from_secs(HYPERLIQUID_HEARTBEAT_SECS));
+                heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                heartbeat.tick().await;
+
                 loop {
-                    match ws.read_frame().await.context("hyperliquid WS read error") {
+                    tokio::select! {
+                        _ = heartbeat.tick() => {
+                            if let Err(err) = ws
+                                .write_frame(Frame::text(hyperliquid_ping_payload().as_bytes().to_vec().into()))
+                                .await
+                            {
+                                tracing::warn!(error = %err, shard_id, "hyperliquid ping send failed");
+                                break;
+                            }
+                            if let Err(err) = ws.flush().await {
+                                tracing::warn!(error = %err, shard_id, "hyperliquid ping flush failed");
+                                break;
+                            }
+                        }
+                        frame_result = ws.read_frame() => match frame_result.context("hyperliquid WS read error") {
+                        Ok(frame) if frame.opcode == OpCode::Ping => {
+                            if let Err(err) = ws.write_frame(pong_frame_for(&frame)).await {
+                                tracing::warn!(error = %err, shard_id, "hyperliquid WS pong send failed");
+                                break;
+                            }
+                            if let Err(err) = ws.flush().await {
+                                tracing::warn!(error = %err, shard_id, "hyperliquid WS pong flush failed");
+                                break;
+                            }
+                        }
+                        Ok(frame) if frame.opcode == OpCode::Pong => {
+                            tracing::debug!(payload_len = frame.payload.len(), shard_id, "hyperliquid WS pong received");
+                        }
                         Ok(frame) if frame.opcode == OpCode::Text => {
                             let text = match std::str::from_utf8(&frame.payload) {
                                 Ok(text) => text,
@@ -472,6 +588,7 @@ pub async fn run_hyperliquid_feed(
                             {
                                 if event_tx.send(MarketEvent::Quote(update)).await.is_err() {
                                     tracing::info!(
+                                        shard_id,
                                         "hyperliquid feed stopped: market event channel closed"
                                     );
                                     return Ok(());
@@ -479,19 +596,20 @@ pub async fn run_hyperliquid_feed(
                             }
                         }
                         Ok(frame) if frame.opcode == OpCode::Close => {
-                            tracing::warn!("hyperliquid WS closed by remote");
+                            tracing::warn!(shard_id, "hyperliquid WS closed by remote");
                             break;
                         }
                         Ok(_) => {}
                         Err(err) => {
-                            tracing::warn!(error = %err, "hyperliquid WS message handling failed");
+                            tracing::warn!(error = ?err, shard_id, "hyperliquid WS message handling failed");
                             break;
+                        }
                         }
                     }
                 }
             }
             Err(err) => {
-                tracing::warn!(error = %err, "hyperliquid WS connect failed");
+                tracing::warn!(error = %err, shard_id, "hyperliquid WS connect failed");
             }
         }
 
@@ -631,5 +749,49 @@ pub async fn run_hyperliquid_funding_poller(
         }
 
         tokio::time::sleep(Duration::from_millis(planned_sleep_ms)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::{hyperliquid_subscription_coins, hyperliquid_symbol_map};
+    use crate::discovery::SymbolMarkets;
+    use crate::model::{Exchange, MarketMeta};
+
+    fn hyperliquid_meta(symbol_base: &str, exchange_symbol: &str) -> MarketMeta {
+        MarketMeta {
+            exchange: Exchange::Hyperliquid,
+            symbol_base: symbol_base.to_owned(),
+            exchange_symbol: exchange_symbol.to_owned(),
+            market_id: None,
+            taker_fee_pct: 0.0,
+            maker_fee_pct: 0.0,
+        }
+    }
+
+    #[test]
+    fn hyperliquid_subscriptions_preserve_exchange_symbol_casing() {
+        let markets: SymbolMarkets = HashMap::from([
+            ("KBONK".to_owned(), vec![hyperliquid_meta("KBONK", "kBONK")]),
+            ("BTC".to_owned(), vec![hyperliquid_meta("BTC", "BTC")]),
+        ]);
+
+        assert_eq!(
+            hyperliquid_subscription_coins(&markets),
+            vec!["BTC".to_owned(), "kBONK".to_owned()]
+        );
+    }
+
+    #[test]
+    fn hyperliquid_symbol_map_accepts_exact_and_normalized_coin_names() {
+        let markets: SymbolMarkets =
+            HashMap::from([("KBONK".to_owned(), vec![hyperliquid_meta("KBONK", "kBONK")])]);
+
+        let symbol_map = hyperliquid_symbol_map(&markets);
+
+        assert_eq!(symbol_map.get("kBONK").map(String::as_str), Some("KBONK"));
+        assert_eq!(symbol_map.get("KBONK").map(String::as_str), Some("KBONK"));
     }
 }

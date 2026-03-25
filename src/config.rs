@@ -36,6 +36,13 @@ pub struct CliArgs {
     pub lighter_rest_url: String,
     #[arg(long, default_value = "https://fapi.asterdex.com/fapi/v1/exchangeInfo")]
     pub aster_rest_url: String,
+    #[arg(long, default_value = "https://fapi.binance.com/fapi/v1/exchangeInfo")]
+    pub binance_rest_url: String,
+    #[arg(
+        long,
+        default_value = "https://api.bybit.com/v5/market/instruments-info"
+    )]
+    pub bybit_rest_url: String,
     #[arg(
         long,
         default_value = "https://api.starknet.extended.exchange/api/v1/info/markets"
@@ -48,9 +55,12 @@ pub struct CliArgs {
     pub edge_x_rest_url: String,
     #[arg(long, default_value = "https://api.hyperliquid.xyz/info")]
     pub hyperliquid_rest_url: String,
-    #[arg(long, default_value = "https://api.grvt.io/full/v1/instruments")]
+    #[arg(
+        long,
+        default_value = "https://market-data.grvt.io/full/v1/all_instruments"
+    )]
     pub grvt_rest_url: String,
-    #[arg(long, default_value = "https://api.pro.apex.exchange/v3/symbols")]
+    #[arg(long, default_value = "https://omni.apex.exchange/api/v3/symbols")]
     pub apex_rest_url: String,
     #[arg(
         long,
@@ -59,6 +69,10 @@ pub struct CliArgs {
     pub lighter_ws_url: String,
     #[arg(long, default_value = "wss://fstream.asterdex.com/ws")]
     pub aster_ws_url: String,
+    #[arg(long, default_value = "wss://fstream.binance.com/stream")]
+    pub binance_ws_url: String,
+    #[arg(long, default_value = "wss://stream.bybit.com/v5/public/linear")]
+    pub bybit_ws_url: String,
     #[arg(
         long,
         default_value = "wss://api.starknet.extended.exchange/stream.extended.exchange/v1/orderbooks?depth=1"
@@ -72,7 +86,7 @@ pub struct CliArgs {
     pub grvt_ws_url: String,
     #[arg(long, default_value = "wss://quote.omni.apex.exchange/realtime_public")]
     pub apex_ws_url: String,
-    #[arg(long, default_value = "https://api.pro.apex.exchange/v3/depth")]
+    #[arg(long, default_value = "https://omni.apex.exchange/api/v3/depth")]
     pub apex_depth_rest_url: String,
     #[arg(
         long,
@@ -113,6 +127,8 @@ pub struct CliArgs {
     pub collector_compression: CollectorCompression,
     #[arg(long, default_value_t = 45_000)]
     pub collector_bootstrap_timeout_ms: u64,
+    #[arg(long, default_value_t = 131_072)]
+    pub collector_bootstrap_buffer_events: usize,
     #[arg(long, default_value_t = 16_384)]
     pub collector_write_buffer: usize,
     #[arg(long, default_value_t = 1_000)]
@@ -125,6 +141,8 @@ pub struct CliArgs {
 pub struct AppConfig {
     pub lighter_rest_url: String,
     pub aster_rest_url: String,
+    pub binance_rest_url: String,
+    pub bybit_rest_url: String,
     pub extended_rest_url: String,
     pub edge_x_rest_url: String,
     pub hyperliquid_rest_url: String,
@@ -132,6 +150,8 @@ pub struct AppConfig {
     pub apex_rest_url: String,
     pub lighter_ws_url: String,
     pub aster_ws_url: String,
+    pub binance_ws_url: String,
+    pub bybit_ws_url: String,
     pub extended_ws_url: String,
     pub edge_x_ws_url: String,
     pub hyperliquid_ws_url: String,
@@ -153,6 +173,7 @@ pub struct AppConfig {
     pub collector_data_root: PathBuf,
     pub collector_compression: CollectorCompression,
     pub collector_bootstrap_timeout_ms: u64,
+    pub collector_bootstrap_buffer_events: usize,
     pub collector_write_buffer: usize,
     pub collector_flush_interval_ms: u64,
     pub collector_max_open_files: usize,
@@ -173,6 +194,8 @@ impl From<CliArgs> for AppConfig {
         Self {
             lighter_rest_url: args.lighter_rest_url,
             aster_rest_url: args.aster_rest_url,
+            binance_rest_url: args.binance_rest_url,
+            bybit_rest_url: args.bybit_rest_url,
             extended_rest_url: args.extended_rest_url,
             edge_x_rest_url: args.edge_x_rest_url,
             hyperliquid_rest_url: args.hyperliquid_rest_url,
@@ -180,6 +203,8 @@ impl From<CliArgs> for AppConfig {
             apex_rest_url: args.apex_rest_url,
             lighter_ws_url: args.lighter_ws_url,
             aster_ws_url: args.aster_ws_url,
+            binance_ws_url: args.binance_ws_url,
+            bybit_ws_url: args.bybit_ws_url,
             extended_ws_url: args.extended_ws_url,
             edge_x_ws_url: args.edge_x_ws_url,
             hyperliquid_ws_url: args.hyperliquid_ws_url,
@@ -201,6 +226,7 @@ impl From<CliArgs> for AppConfig {
             collector_data_root: args.collector_data_root,
             collector_compression: args.collector_compression,
             collector_bootstrap_timeout_ms: args.collector_bootstrap_timeout_ms,
+            collector_bootstrap_buffer_events: args.collector_bootstrap_buffer_events,
             collector_write_buffer: args.collector_write_buffer,
             collector_flush_interval_ms: args.collector_flush_interval_ms,
             collector_max_open_files: args.collector_max_open_files,

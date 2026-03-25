@@ -328,3 +328,32 @@ fn inactive_route_is_cleaned_by_global_prune() {
 
     assert_eq!(state.history_len_for_route(route_id), Some(0));
 }
+
+#[test]
+fn disabling_exchange_clears_route_history_for_affected_routes() {
+    let mut state = EngineState::new(Arc::new(markets_two_exchanges()));
+
+    state.ingest_event(
+        MarketEvent::Quote(quote(
+            Exchange::Lighter,
+            "BTC",
+            99.5,
+            2.0,
+            100.0,
+            2.0,
+            1_000,
+        )),
+        1_000,
+    );
+    state.ingest_event(
+        MarketEvent::Quote(quote(Exchange::Aster, "BTC", 101.0, 2.0, 101.3, 2.0, 1_000)),
+        1_000,
+    );
+
+    let route_id = route_id_for(&state, "BTC", Exchange::Lighter, Exchange::Aster);
+    assert!(state.history_snapshot_for_route(route_id, 1_000).is_some());
+
+    state.ingest_event(MarketEvent::ExchangeDisabled(Exchange::Aster), 1_010);
+
+    assert!(state.history_snapshot_for_route(route_id, 1_010).is_none());
+}

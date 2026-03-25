@@ -8,8 +8,10 @@ use fastwebsockets::{Frame, OpCode};
 use reqwest::StatusCode;
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
-use tokio::runtime::Runtime;
+use tokio::runtime::Handle;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 use crate::config::AppConfig;
 use crate::discovery::SymbolMarkets;
@@ -29,23 +31,32 @@ impl ExchangeFeed for EdgeXFeed {
 
     fn spawn(
         &self,
-        runtime: &Runtime,
+        runtime: &Handle,
         config: &AppConfig,
         markets: Arc<SymbolMarkets>,
         event_tx: mpsc::Sender<MarketEvent>,
-    ) {
+        cancel_token: CancellationToken,
+    ) -> Vec<JoinHandle<()>> {
         let ws_url = config.edge_x_ws_url.clone();
         let feed_markets = Arc::clone(&markets);
         let quote_event_tx = event_tx.clone();
-        runtime.spawn(async move {
-            if let Err(err) = run_edge_x_feed(&ws_url, &feed_markets, quote_event_tx).await {
-                tracing::error!(error = %err, "edgeX feed task terminated");
+        let task = runtime.spawn(async move {
+            tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    tracing::info!("edgeX feed task cancelled");
+                }
+                result = run_edge_x_feed(&ws_url, &feed_markets, quote_event_tx) => {
+                    if let Err(err) = result {
+                        tracing::error!(error = %err, "edgeX feed task terminated");
+                    }
+                }
             }
         });
 
         tracing::info!(
             "edgeX funding sourced from WS ticker channel; REST funding poller disabled"
         );
+        vec![task]
     }
 }
 

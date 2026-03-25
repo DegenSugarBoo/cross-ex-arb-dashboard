@@ -1,4 +1,6 @@
+use std::collections::HashMap;
 use std::fmt;
+use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use compact_str::CompactString;
@@ -12,9 +14,11 @@ pub enum Exchange {
     Hyperliquid,
     Grvt,
     ApeX,
+    Binance,
+    Bybit,
 }
 
-pub const EXCHANGE_COUNT: usize = 7;
+pub const EXCHANGE_COUNT: usize = 9;
 
 impl Exchange {
     pub fn all() -> &'static [Exchange] {
@@ -26,6 +30,8 @@ impl Exchange {
             Exchange::Hyperliquid,
             Exchange::Grvt,
             Exchange::ApeX,
+            Exchange::Binance,
+            Exchange::Bybit,
         ]
     }
 
@@ -43,6 +49,8 @@ impl Exchange {
             Self::Hyperliquid => "Hyperliquid",
             Self::Grvt => "GRVT",
             Self::ApeX => "ApeX",
+            Self::Binance => "Binance",
+            Self::Bybit => "Bybit",
         }
     }
 }
@@ -91,6 +99,8 @@ pub struct FundingUpdate {
 pub enum MarketEvent {
     Quote(QuoteUpdate),
     Funding(FundingUpdate),
+    ExchangeEnabled(Exchange),
+    ExchangeDisabled(Exchange),
 }
 
 #[derive(Debug, Clone)]
@@ -148,6 +158,40 @@ pub struct ExchangeFeedHealth {
     pub funding_rate_per_sec: f64,
     pub total_quote_events: u64,
     pub total_funding_events: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExchangeConnectionState {
+    pub enabled: bool,
+    pub updated_at_ms: i64,
+}
+
+impl ExchangeConnectionState {
+    pub fn enabled(now_ms: i64) -> Self {
+        Self {
+            enabled: true,
+            updated_at_ms: now_ms,
+        }
+    }
+
+    pub fn disabled(now_ms: i64) -> Self {
+        Self {
+            enabled: false,
+            updated_at_ms: now_ms,
+        }
+    }
+}
+
+pub type SharedExchangeConnectionStates = Arc<RwLock<HashMap<Exchange, ExchangeConnectionState>>>;
+
+pub fn initial_exchange_connection_states(
+    now_ms: i64,
+) -> HashMap<Exchange, ExchangeConnectionState> {
+    Exchange::all()
+        .iter()
+        .copied()
+        .map(|exchange| (exchange, ExchangeConnectionState::enabled(now_ms)))
+        .collect()
 }
 
 pub fn now_ms() -> i64 {

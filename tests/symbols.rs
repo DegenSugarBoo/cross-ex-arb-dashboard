@@ -1,8 +1,9 @@
 use cross_ex_arb::discovery::{
-    ApexPerpetualContract, AsterSymbol, ExtendedMarket, GrvtInstrument, LighterOrderBook,
-    derive_base_from_grvt_instrument, is_apex_perp_trading, is_aster_perp_trading,
-    is_extended_perp_trading, is_grvt_perp_active, is_lighter_perp_active,
-    normalize_apex_symbol_base, normalize_base,
+    ApexPerpetualContract, ApexSymbolsResponse, AsterSymbol, BinanceSymbol, BybitInstrument,
+    ExtendedMarket, GrvtInstrument, LighterOrderBook, derive_base_from_grvt_instrument,
+    is_apex_perp_trading, is_aster_perp_trading, is_binance_usdt_perp_trading,
+    is_bybit_usdt_linear_perp_trading, is_extended_perp_trading, is_grvt_perp_active,
+    is_lighter_perp_active, normalize_apex_symbol_base, normalize_base,
 };
 
 #[test]
@@ -63,6 +64,75 @@ fn aster_filter_requires_perpetual_usdt_trading() {
 }
 
 #[test]
+fn binance_filter_requires_perpetual_usdt_trading() {
+    let valid = BinanceSymbol {
+        symbol: "BTCUSDT".to_owned(),
+        base_asset: "BTC".to_owned(),
+        quote_asset: "USDT".to_owned(),
+        contract_type: "PERPETUAL".to_owned(),
+        status: "TRADING".to_owned(),
+    };
+
+    let wrong_quote = BinanceSymbol {
+        quote_asset: "BUSD".to_owned(),
+        ..valid.clone()
+    };
+
+    let wrong_type = BinanceSymbol {
+        contract_type: "CURRENT_QUARTER".to_owned(),
+        ..valid.clone()
+    };
+
+    let halted = BinanceSymbol {
+        status: "BREAK".to_owned(),
+        ..valid.clone()
+    };
+
+    assert!(is_binance_usdt_perp_trading(&valid));
+    assert!(!is_binance_usdt_perp_trading(&wrong_quote));
+    assert!(!is_binance_usdt_perp_trading(&wrong_type));
+    assert!(!is_binance_usdt_perp_trading(&halted));
+}
+
+#[test]
+fn bybit_filter_requires_linear_perpetual_trading_usdt() {
+    let valid = BybitInstrument {
+        symbol: "BTCUSDT".to_owned(),
+        base_coin: "BTC".to_owned(),
+        quote_coin: "USDT".to_owned(),
+        contract_type: Some("LinearPerpetual".to_owned()),
+        status: Some("Trading".to_owned()),
+        is_pre_listing: Some(false),
+    };
+
+    let wrong_quote = BybitInstrument {
+        quote_coin: "USDC".to_owned(),
+        ..valid.clone()
+    };
+
+    let wrong_type = BybitInstrument {
+        contract_type: Some("LinearFutures".to_owned()),
+        ..valid.clone()
+    };
+
+    let halted = BybitInstrument {
+        status: Some("Settled".to_owned()),
+        ..valid.clone()
+    };
+
+    let pre_listing = BybitInstrument {
+        is_pre_listing: Some(true),
+        ..valid.clone()
+    };
+
+    assert!(is_bybit_usdt_linear_perp_trading(&valid));
+    assert!(!is_bybit_usdt_linear_perp_trading(&wrong_quote));
+    assert!(!is_bybit_usdt_linear_perp_trading(&wrong_type));
+    assert!(!is_bybit_usdt_linear_perp_trading(&halted));
+    assert!(!is_bybit_usdt_linear_perp_trading(&pre_listing));
+}
+
+#[test]
 fn extended_filter_accepts_active_markets() {
     let active = ExtendedMarket {
         name: "BTC-USD".to_owned(),
@@ -113,11 +183,12 @@ fn grvt_filter_and_base_derivation_work() {
 fn apex_filter_and_base_normalization_work() {
     let contract = ApexPerpetualContract {
         cross_symbol_name: Some("BTCUSDT".to_owned()),
+        symbol: Some("BTC-USDT".to_owned()),
         base_token_id: Some("BTC".to_owned()),
         enable_trade: Some(true),
         enable_display: Some(true),
         status: Some("TRADING".to_owned()),
-        contract_type: Some("PERPETUAL".to_owned()),
+        contract_type: Some("UNKNOWN_CONTRACT_TYPE".to_owned()),
     };
 
     let disabled = ApexPerpetualContract {
@@ -128,6 +199,7 @@ fn apex_filter_and_base_normalization_work() {
     let fallback_parse = ApexPerpetualContract {
         base_token_id: None,
         cross_symbol_name: Some("ETHUSDT".to_owned()),
+        symbol: Some("ETH-USDT".to_owned()),
         ..contract.clone()
     };
 
@@ -141,4 +213,31 @@ fn apex_filter_and_base_normalization_work() {
         normalize_apex_symbol_base(&fallback_parse),
         Some("ETH".to_owned())
     );
+}
+
+#[test]
+fn apex_symbols_response_reads_contract_config_payloads() {
+    let payload = r#"{
+        "data": {
+            "contractConfig": {
+                "perpetualContract": [
+                    {
+                        "crossSymbolName": "BTCUSDT",
+                        "symbol": "BTC-USDT",
+                        "baseTokenId": "BTC",
+                        "enableTrade": true,
+                        "enableDisplay": true,
+                        "contractType": "UNKNOWN_CONTRACT_TYPE"
+                    }
+                ]
+            }
+        }
+    }"#;
+
+    let parsed: ApexSymbolsResponse = serde_json::from_str(payload).expect("apex symbols payload");
+    let contracts = parsed.contracts();
+
+    assert_eq!(contracts.len(), 1);
+    assert_eq!(contracts[0].cross_symbol_name.as_deref(), Some("BTCUSDT"));
+    assert_eq!(contracts[0].symbol.as_deref(), Some("BTC-USDT"));
 }

@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{
     Arc, RwLock,
     atomic::{AtomicU32, Ordering as AtomicOrdering},
@@ -114,6 +114,7 @@ pub struct EngineState {
     route_catalog: Vec<RouteMeta>,
     routes_by_symbol: HashMap<CompactString, Vec<u32>>,
     route_history: Vec<RouteHistoryColumns>,
+    exchange_enabled: [bool; EXCHANGE_COUNT],
     // Reusable buffer to avoid repeated allocations.
     snapshot_buf: Vec<ArbRow>,
     detail_revision: u64,
@@ -144,6 +145,7 @@ impl EngineState {
             route_catalog,
             routes_by_symbol,
             route_history,
+            exchange_enabled: [true; EXCHANGE_COUNT],
             snapshot_buf: Vec::new(),
             detail_revision: 0,
         }
@@ -178,9 +180,30 @@ impl EngineState {
 
     pub fn ingest_event(&mut self, event: MarketEvent, now_ms: i64) {
         match event {
-            MarketEvent::Quote(quote) => self.ingest_quote(quote, now_ms),
-            MarketEvent::Funding(funding) => self.ingest_funding(funding),
+            MarketEvent::Quote(quote) => {
+                if self.exchange_is_enabled(quote.exchange) {
+                    self.ingest_quote(quote, now_ms);
+                }
+            }
+            MarketEvent::Funding(funding) => {
+                if self.exchange_is_enabled(funding.exchange) {
+                    self.ingest_funding(funding);
+                }
+            }
+            MarketEvent::ExchangeEnabled(exchange) => self.set_exchange_enabled(exchange, true),
+            MarketEvent::ExchangeDisabled(exchange) => {
+                self.set_exchange_enabled(exchange, false);
+                self.disable_exchange(exchange, now_ms);
+            }
         }
+    }
+
+    pub fn set_exchange_enabled(&mut self, exchange: Exchange, enabled: bool) {
+        self.exchange_enabled[exchange.index()] = enabled;
+    }
+
+    pub fn exchange_is_enabled(&self, exchange: Exchange) -> bool {
+        self.exchange_enabled[exchange.index()]
     }
 
     fn ingest_quote(&mut self, quote: QuoteUpdate, now_ms: i64) {
@@ -199,6 +222,42 @@ impl EngineState {
             .entry(funding.symbol_base.clone())
             .or_default();
         funding_slot.by_exchange[ex_idx] = Some(funding);
+    }
+
+    pub fn disable_exchange(&mut self, exchange: Exchange, now_ms: i64) {
+        let exchange_idx = exchange.index();
+        let mut affected_symbols: HashSet<CompactString> = HashSet::new();
+
+        for (symbol, quotes) in &mut self.latest_quotes {
+            if quotes.by_exchange[exchange_idx].take().is_some() {
+                affected_symbols.insert(symbol.clone());
+            }
+        }
+
+        for (symbol, funding) in &mut self.latest_funding {
+            if funding.by_exchange[exchange_idx].take().is_some() {
+                affected_symbols.insert(symbol.clone());
+            }
+        }
+
+        self.latest_quotes
+            .retain(|_, quotes| quotes.by_exchange.iter().any(Option::is_some));
+        self.latest_funding
+            .retain(|_, funding| funding.by_exchange.iter().any(Option::is_some));
+
+        self.clear_route_history_for_exchange(exchange);
+
+        for symbol in affected_symbols {
+            self.recompute_symbol(symbol.as_str(), now_ms);
+        }
+    }
+
+    fn clear_route_history_for_exchange(&mut self, exchange: Exchange) {
+        for (route_id, route_meta) in self.route_catalog.iter().enumerate() {
+            if route_meta.buy_ex == exchange || route_meta.sell_ex == exchange {
+                self.route_history[route_id] = RouteHistoryColumns::default();
+            }
+        }
     }
 
     fn recompute_symbol(&mut self, symbol: &str, now_ms: i64) {
@@ -690,6 +749,15 @@ fn update_exchange_health_rates(
     });
 }
 
+fn reset_exchange_health(
+    health_snapshot: &Arc<RwLock<HashMap<Exchange, ExchangeFeedHealth>>>,
+    exchange: Exchange,
+) {
+    with_health_write(health_snapshot, |guard| {
+        guard.insert(exchange, ExchangeFeedHealth::default());
+    });
+}
+
 pub async fn run_engine(
     mut event_rx: mpsc::Receiver<MarketEvent>,
     markets: Arc<SymbolMarkets>,
@@ -720,32 +788,70 @@ pub async fn run_engine(
             maybe_event = event_rx.recv() => {
                 match maybe_event {
                     Some(event) => {
-                        events_in_window = events_in_window.saturating_add(1);
                         let now = now_ms();
-                        let (exchange, is_quote) = match &event {
-                            MarketEvent::Quote(quote) => (quote.exchange, true),
-                            MarketEvent::Funding(funding) => (funding.exchange, false),
-                        };
-                        {
-                            let pending = pending_health_updates.entry(exchange).or_default();
-                            pending.last_event_ms = Some(now);
-                            if is_quote {
-                                pending.last_quote_ms = Some(now);
-                                pending.quote_events_inc = pending.quote_events_inc.saturating_add(1);
-                            } else {
-                                pending.last_funding_ms = Some(now);
-                                pending.funding_events_inc = pending.funding_events_inc.saturating_add(1);
+                        match event {
+                            MarketEvent::Quote(quote) => {
+                                if !state.exchange_is_enabled(quote.exchange) {
+                                    continue;
+                                }
+
+                                events_in_window = events_in_window.saturating_add(1);
+                                let exchange = quote.exchange;
+                                {
+                                    let pending = pending_health_updates.entry(exchange).or_default();
+                                    pending.last_event_ms = Some(now);
+                                    pending.last_quote_ms = Some(now);
+                                    pending.quote_events_inc =
+                                        pending.quote_events_inc.saturating_add(1);
+                                }
+                                {
+                                    let entry = per_exchange_window.entry(exchange).or_insert((0, 0));
+                                    entry.0 = entry.0.saturating_add(1);
+                                }
+                                state.ingest_event(MarketEvent::Quote(quote), now);
+                            }
+                            MarketEvent::Funding(funding) => {
+                                if !state.exchange_is_enabled(funding.exchange) {
+                                    continue;
+                                }
+
+                                events_in_window = events_in_window.saturating_add(1);
+                                let exchange = funding.exchange;
+                                {
+                                    let pending = pending_health_updates.entry(exchange).or_default();
+                                    pending.last_event_ms = Some(now);
+                                    pending.last_funding_ms = Some(now);
+                                    pending.funding_events_inc =
+                                        pending.funding_events_inc.saturating_add(1);
+                                }
+                                {
+                                    let entry = per_exchange_window.entry(exchange).or_insert((0, 0));
+                                    entry.1 = entry.1.saturating_add(1);
+                                }
+                                state.ingest_event(MarketEvent::Funding(funding), now);
+                            }
+                            MarketEvent::ExchangeEnabled(exchange) => {
+                                pending_health_updates.remove(&exchange);
+                                per_exchange_window.remove(&exchange);
+                                reset_exchange_health(&health_snapshot, exchange);
+                                state.ingest_event(MarketEvent::ExchangeEnabled(exchange), now);
+                            }
+                            MarketEvent::ExchangeDisabled(exchange) => {
+                                pending_health_updates.remove(&exchange);
+                                per_exchange_window.remove(&exchange);
+                                reset_exchange_health(&health_snapshot, exchange);
+                                state.ingest_event(MarketEvent::ExchangeDisabled(exchange), now);
+                                let rows = state.ranked_snapshot_all(now, config.stale_ms);
+                                replace_snapshot(&snapshot, rows);
+                                let selected = selected_route_id.load(AtomicOrdering::Relaxed);
+                                let next_snapshot = if selected == NO_ROUTE_SELECTED {
+                                    None
+                                } else {
+                                    state.history_snapshot_for_route(selected, now)
+                                };
+                                replace_detail_snapshot(&detail_snapshot, next_snapshot);
                             }
                         }
-                        {
-                            let entry = per_exchange_window.entry(exchange).or_insert((0, 0));
-                            if is_quote {
-                                entry.0 = entry.0.saturating_add(1);
-                            } else {
-                                entry.1 = entry.1.saturating_add(1);
-                            }
-                        }
-                        state.ingest_event(event, now);
                     }
                     None => {
                         flush_exchange_health_events(&health_snapshot, &mut pending_health_updates);

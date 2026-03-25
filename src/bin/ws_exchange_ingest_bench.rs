@@ -3,6 +3,12 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, bail};
 use cross_ex_arb::feeds::aster::{parse_book_ticker_message, parse_mark_price_message};
+use cross_ex_arb::feeds::binance::{
+    parse_binance_book_ticker_message, parse_binance_mark_price_message,
+};
+use cross_ex_arb::feeds::bybit::{
+    BybitTickerState, apply_bybit_ticker_patch, parse_bybit_ticker_message,
+};
 use cross_ex_arb::feeds::edge_x::{
     parse_edge_x_depth_message, parse_edge_x_ticker_funding_message,
 };
@@ -24,6 +30,11 @@ const ROUNDS: usize = 3;
 
 const ASTER_BOOK: &str = r#"{"e":"bookTicker","s":"BTCUSDT","b":"101.0","B":"1.50","a":"101.2","A":"0.80","T":1700000001111,"E":1700000002222}"#;
 const ASTER_MARK: &str = r#"{"e":"markPriceUpdate","E":1700000010000,"s":"BTCUSDT","r":"-0.00001411","T":1700006400000}"#;
+const BINANCE_BOOK: &str = r#"{"stream":"btcusdt@bookTicker","data":{"e":"bookTicker","E":1700000002222,"s":"BTCUSDT","b":"101.0","B":"1.50","a":"101.2","A":"0.80","T":1700000001111}}"#;
+const BINANCE_MARK: &str = r#"{"stream":"btcusdt@markPrice","data":{"e":"markPriceUpdate","E":1700000010000,"s":"BTCUSDT","p":"101.1","r":"-0.00001411","T":1700006400000}}"#;
+const BYBIT_SNAPSHOT: &str = r#"{"topic":"tickers.BTCUSDT","type":"snapshot","ts":1700000000000,"data":{"symbol":"BTCUSDT","bid1Price":"100.10","bid1Size":"2.50","ask1Price":"100.30","ask1Size":"1.75","fundingRate":"0.00010","nextFundingTime":1700003600000}}"#;
+const BYBIT_DELTA_QUOTE: &str = r#"{"topic":"tickers.BTCUSDT","type":"delta","ts":1700000005000,"data":{"symbol":"BTCUSDT","bid1Price":"100.20","bid1Size":"2.00","ask1Price":"100.40","ask1Size":"1.50"}}"#;
+const BYBIT_DELTA_FUNDING: &str = r#"{"topic":"tickers.BTCUSDT","type":"delta","ts":1700000010000,"data":{"symbol":"BTCUSDT","fundingRate":"0.00012","nextFundingTime":1700007200000}}"#;
 const LIGHTER_TICKER: &str = r#"{"channel":"ticker:1","ticker":{"s":"BTC","a":{"price":"100.5","size":"1.25"},"b":{"price":"100.0","size":"2.50"}},"timestamp":1700000000000,"type":"update/ticker"}"#;
 const LIGHTER_STATS: &str = r#"{"channel":"market_stats:1","market_stats":{"symbol":"BTC","market_id":1,"current_funding_rate":"0.0002","funding_timestamp":1700000400000},"timestamp":1700000000000,"type":"update/market_stats"}"#;
 const EDGE_X_DEPTH: &str = r#"{"type":"update/depth","channel":"depth.101.15","content":{"data":[{"contractId":"101","bids":[["100.5","2.0"]],"asks":[["100.7","1.5"]],"timestamp":1700000020000}]}}"#;
@@ -34,6 +45,8 @@ const HYPERLIQUID_BBO: &str = r#"{"channel":"bbo","data":{"coin":"BTC","time":17
 
 struct BenchContext {
     aster_symbol_map: HashMap<String, String>,
+    binance_symbol_map: HashMap<String, String>,
+    bybit_seed_state: BybitTickerState,
     lighter_market_map: HashMap<u32, String>,
     edge_market_map: HashMap<u32, String>,
     extended_symbol_map: HashMap<String, String>,
@@ -44,6 +57,11 @@ struct BenchContext {
 enum Scenario {
     AsterBookTicker,
     AsterMarkPrice,
+    BinanceBookTicker,
+    BinanceMarkPrice,
+    BybitTickerSnapshot,
+    BybitTickerDeltaQuote,
+    BybitTickerDeltaFunding,
     LighterTicker,
     LighterFunding,
     EdgeXDepth,
@@ -54,10 +72,15 @@ enum Scenario {
 }
 
 impl Scenario {
-    fn all() -> [Self; 9] {
+    fn all() -> [Self; 14] {
         [
             Self::AsterBookTicker,
             Self::AsterMarkPrice,
+            Self::BinanceBookTicker,
+            Self::BinanceMarkPrice,
+            Self::BybitTickerSnapshot,
+            Self::BybitTickerDeltaQuote,
+            Self::BybitTickerDeltaFunding,
             Self::LighterTicker,
             Self::LighterFunding,
             Self::EdgeXDepth,
@@ -72,6 +95,11 @@ impl Scenario {
         match self {
             Self::AsterBookTicker => "aster ws ingest bookTicker",
             Self::AsterMarkPrice => "aster ws ingest markPrice",
+            Self::BinanceBookTicker => "binance ws ingest bookTicker",
+            Self::BinanceMarkPrice => "binance ws ingest markPrice",
+            Self::BybitTickerSnapshot => "bybit ws ingest ticker snapshot",
+            Self::BybitTickerDeltaQuote => "bybit ws ingest ticker delta quote",
+            Self::BybitTickerDeltaFunding => "bybit ws ingest ticker delta funding",
             Self::LighterTicker => "lighter ws ingest ticker",
             Self::LighterFunding => "lighter ws ingest marketStats",
             Self::EdgeXDepth => "edgeX ws ingest depth",
@@ -86,6 +114,11 @@ impl Scenario {
         match self {
             Self::AsterBookTicker => ASTER_BOOK,
             Self::AsterMarkPrice => ASTER_MARK,
+            Self::BinanceBookTicker => BINANCE_BOOK,
+            Self::BinanceMarkPrice => BINANCE_MARK,
+            Self::BybitTickerSnapshot => BYBIT_SNAPSHOT,
+            Self::BybitTickerDeltaQuote => BYBIT_DELTA_QUOTE,
+            Self::BybitTickerDeltaFunding => BYBIT_DELTA_FUNDING,
             Self::LighterTicker => LIGHTER_TICKER,
             Self::LighterFunding => LIGHTER_STATS,
             Self::EdgeXDepth => EDGE_X_DEPTH,
@@ -104,6 +137,37 @@ impl Scenario {
             Self::AsterMarkPrice => {
                 parse_mark_price_message(raw, &ctx.aster_symbol_map, recv_ts_ms).is_some()
             }
+            Self::BinanceBookTicker => {
+                parse_binance_book_ticker_message(raw, &ctx.binance_symbol_map, recv_ts_ms)
+                    .is_some()
+            }
+            Self::BinanceMarkPrice => {
+                parse_binance_mark_price_message(raw, &ctx.binance_symbol_map, recv_ts_ms).is_some()
+            }
+            Self::BybitTickerSnapshot => parse_bybit_ticker_message(raw, recv_ts_ms)
+                .map(|patch| {
+                    let mut state = BybitTickerState::default();
+                    let (quote, funding) =
+                        apply_bybit_ticker_patch(&mut state, &patch, "BTC", recv_ts_ms);
+                    quote.is_some() || funding.is_some()
+                })
+                .unwrap_or(false),
+            Self::BybitTickerDeltaQuote => parse_bybit_ticker_message(raw, recv_ts_ms)
+                .map(|patch| {
+                    let mut state = ctx.bybit_seed_state.clone();
+                    let (quote, _) =
+                        apply_bybit_ticker_patch(&mut state, &patch, "BTC", recv_ts_ms);
+                    quote.is_some()
+                })
+                .unwrap_or(false),
+            Self::BybitTickerDeltaFunding => parse_bybit_ticker_message(raw, recv_ts_ms)
+                .map(|patch| {
+                    let mut state = ctx.bybit_seed_state.clone();
+                    let (_, funding) =
+                        apply_bybit_ticker_patch(&mut state, &patch, "BTC", recv_ts_ms);
+                    funding.is_some()
+                })
+                .unwrap_or(false),
             Self::LighterTicker => {
                 parse_ticker_message(raw, &ctx.lighter_market_map, recv_ts_ms).is_some()
             }
@@ -220,8 +284,20 @@ fn print_row(name: &str, frames: usize, elapsed: Duration) {
 }
 
 fn bench_context() -> BenchContext {
+    let snapshot_patch =
+        parse_bybit_ticker_message(BYBIT_SNAPSHOT, 1_700_000_000_999).expect("bybit snapshot");
+    let mut bybit_seed_state = BybitTickerState::default();
+    let _ = apply_bybit_ticker_patch(
+        &mut bybit_seed_state,
+        &snapshot_patch,
+        "BTC",
+        1_700_000_000_999,
+    );
+
     BenchContext {
         aster_symbol_map: HashMap::from([("BTCUSDT".to_owned(), "BTC".to_owned())]),
+        binance_symbol_map: HashMap::from([("BTCUSDT".to_owned(), "BTC".to_owned())]),
+        bybit_seed_state,
         lighter_market_map: HashMap::from([(1_u32, "BTC".to_owned())]),
         edge_market_map: HashMap::from([(101_u32, "BTC".to_owned())]),
         extended_symbol_map: HashMap::from([("BTC-USD".to_owned(), "BTC".to_owned())]),

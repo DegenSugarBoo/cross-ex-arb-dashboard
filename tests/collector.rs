@@ -45,6 +45,7 @@ fn collector_settings(root: &Path) -> CollectorSettings {
         data_root: root.to_path_buf(),
         compression: CollectorCompression::None,
         bootstrap_timeout_ms: 5_000,
+        bootstrap_buffer_events: 1_024,
         write_buffer: 1_024,
         flush_interval_ms: 20,
         max_open_files: 64,

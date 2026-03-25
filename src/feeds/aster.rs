@@ -6,8 +6,10 @@ use anyhow::Context;
 use fastwebsockets::{Frame, OpCode};
 use serde::Deserialize;
 use serde_json::json;
-use tokio::runtime::Runtime;
+use tokio::runtime::Handle;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 use crate::config::AppConfig;
 use crate::discovery::{SymbolMarkets, normalize_base};
@@ -19,6 +21,11 @@ use crate::model::{Exchange, FundingUpdate, MarketEvent, QuoteUpdate, now_ms};
 use crate::ws_fast::connect_fast_websocket;
 
 pub struct AsterFeed;
+const ASTER_ALL_BOOK_TICKER_STREAM: &str = "!bookTicker";
+
+fn pong_frame_for(frame: &Frame<'_>) -> Frame<'static> {
+    Frame::pong(frame.payload.to_vec().into())
+}
 
 impl ExchangeFeed for AsterFeed {
     fn exchange(&self) -> Exchange {
@@ -27,39 +34,58 @@ impl ExchangeFeed for AsterFeed {
 
     fn spawn(
         &self,
-        runtime: &Runtime,
+        runtime: &Handle,
         config: &AppConfig,
         markets: Arc<SymbolMarkets>,
         event_tx: mpsc::Sender<MarketEvent>,
-    ) {
+        cancel_token: CancellationToken,
+    ) -> Vec<JoinHandle<()>> {
         let ws_url = config.aster_ws_url.clone();
         let feed_markets = Arc::clone(&markets);
         let quote_event_tx = event_tx.clone();
-        runtime.spawn(async move {
-            if let Err(err) = run_aster_feed(&ws_url, &feed_markets, quote_event_tx).await {
-                tracing::error!(error = %err, "aster feed task terminated");
+        let quote_cancel = cancel_token.clone();
+        let quote_task = runtime.spawn(async move {
+            tokio::select! {
+                _ = quote_cancel.cancelled() => {
+                    tracing::info!("aster feed task cancelled");
+                }
+                result = run_aster_feed(&ws_url, &feed_markets, quote_event_tx) => {
+                    if let Err(err) = result {
+                        tracing::error!(error = %err, "aster feed task terminated");
+                    }
+                }
             }
         });
+        let mut handles = vec![quote_task];
 
         if config.funding_poll_secs > 0 {
             let funding_url = config.aster_funding_rest_url.clone();
             let poll_secs = config.funding_poll_secs;
             let timeout_secs = config.http_timeout_secs;
             let funding_markets = Arc::clone(&markets);
-            runtime.spawn(async move {
-                if let Err(err) = run_aster_funding_poller(
-                    &funding_url,
-                    &funding_markets,
-                    poll_secs,
-                    timeout_secs,
-                    event_tx,
-                )
-                .await
-                {
-                    tracing::error!(error = %err, "aster funding poller terminated");
+            let funding_cancel = cancel_token;
+            let funding_task = runtime.spawn(async move {
+                tokio::select! {
+                    _ = funding_cancel.cancelled() => {
+                        tracing::info!("aster funding poller cancelled");
+                    }
+                    result = run_aster_funding_poller(
+                        &funding_url,
+                        &funding_markets,
+                        poll_secs,
+                        timeout_secs,
+                        event_tx,
+                    ) => {
+                        if let Err(err) = result {
+                            tracing::error!(error = %err, "aster funding poller terminated");
+                        }
+                    }
                 }
             });
+            handles.push(funding_task);
         }
+
+        handles
     }
 }
 
@@ -106,16 +132,10 @@ struct AsterPremiumIndexItem {
     next_funding_time: i64,
 }
 
-pub fn aster_subscribe_payload(exchange_symbols: &[String], request_id: u64) -> String {
-    let mut params: Vec<String> = Vec::with_capacity(exchange_symbols.len());
-    for symbol in exchange_symbols {
-        let lower = symbol.to_ascii_lowercase();
-        params.push(format!("{lower}@bookTicker"));
-    }
-
+pub fn aster_subscribe_payload(streams: &[String], request_id: u64) -> String {
     json!({
         "method": "SUBSCRIBE",
-        "params": params,
+        "params": streams,
         "id": request_id,
     })
     .to_string()
@@ -211,20 +231,20 @@ pub async fn run_aster_feed(
                 .map(|meta| (normalize_base(&meta.exchange_symbol), symbol_base.clone()))
         })
         .collect();
-    let mut subscribe_symbols: Vec<String> = symbol_map.keys().cloned().collect();
-    subscribe_symbols.sort_unstable();
-
-    if subscribe_symbols.is_empty() {
+    if symbol_map.is_empty() {
         tracing::warn!("aster feed skipped: no matched symbols to subscribe");
         return Ok(());
     }
+
+    let subscribe_streams = vec![ASTER_ALL_BOOK_TICKER_STREAM.to_owned()];
 
     let mut attempt = 0u32;
 
     loop {
         tracing::info!(
             attempt,
-            subscriptions = subscribe_symbols.len(),
+            subscriptions = subscribe_streams.len(),
+            tracked_symbols = symbol_map.len(),
             "connecting aster WS"
         );
 
@@ -233,7 +253,7 @@ pub async fn run_aster_feed(
                 tracing::info!("connected aster WS");
                 attempt = 0;
 
-                let payload = aster_subscribe_payload(&subscribe_symbols, 1);
+                let payload = aster_subscribe_payload(&subscribe_streams, 1);
                 if let Err(err) = ws
                     .write_frame(Frame::text(payload.into_bytes().into()))
                     .await
@@ -254,6 +274,22 @@ pub async fn run_aster_feed(
 
                 loop {
                     match ws.read_frame().await.context("aster WS read error") {
+                        Ok(frame) if frame.opcode == OpCode::Ping => {
+                            if let Err(err) = ws.write_frame(pong_frame_for(&frame)).await {
+                                tracing::warn!(error = %err, "aster WS pong send failed");
+                                break;
+                            }
+                            if let Err(err) = ws.flush().await {
+                                tracing::warn!(error = %err, "aster WS pong flush failed");
+                                break;
+                            }
+                        }
+                        Ok(frame) if frame.opcode == OpCode::Pong => {
+                            tracing::debug!(
+                                payload_len = frame.payload.len(),
+                                "aster WS pong received"
+                            );
+                        }
                         Ok(frame) if frame.opcode == OpCode::Text => {
                             let text = match std::str::from_utf8(&frame.payload) {
                                 Ok(text) => text,
