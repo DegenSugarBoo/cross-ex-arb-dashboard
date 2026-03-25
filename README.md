@@ -110,6 +110,32 @@ net_bps = raw_bps - 2 * (buy_taker_fee_pct * 100) - 2 * (sell_taker_fee_pct * 10
 
 The UI shows the top 20 rows by `net_bps`.
 
+### Trading Fee Assumptions Behind `net_bps`
+
+`net_bps` is intentionally conservative. The current implementation subtracts taker fees for both exchanges and applies a `2x` multiplier to each exchange leg:
+
+- `buy_taker_fee_pct` is the buy venue's taker fee in percent units, for example `0.04` means `0.04%`
+- `sell_taker_fee_pct` is the sell venue's taker fee in percent units
+- the engine converts each percent fee into basis points by multiplying by `100`
+- each side is then multiplied by `2`, so the formula currently assumes a round-trip style fee haircut on both the buy venue and the sell venue
+- maker fees, rebates, VIP tiers, token discounts, borrow costs, transfer costs, slippage, and funding carry are not folded into `net_bps`
+
+Current fee sources and defaults used by route construction:
+
+| Exchange | Fee Assumption Used In `net_bps` |
+| --- | --- |
+| Lighter | Uses per-market `taker_fee` returned by discovery metadata |
+| Aster | Fixed taker fee `0.04%` |
+| Binance | Fixed taker fee `0.04%` |
+| Bybit | Fixed taker fee `0.04%` |
+| Extended | Fixed taker fee `0.025%` |
+| edgeX | Uses metadata `takerFeeRate` when present, otherwise falls back to `0.038%` |
+| Hyperliquid | Fixed taker fee `0.045%` |
+| GRVT | Fixed taker fee `0.045%` |
+| ApeX | Fixed taker fee `0.05%` |
+
+If your real trading costs differ from these defaults, the displayed `net_bps` should be treated as an approximation rather than execution-ready PnL.
+
 ### Collector Mode
 
 Collector mode runs the same discovery and feed stack without launching the desktop UI:
