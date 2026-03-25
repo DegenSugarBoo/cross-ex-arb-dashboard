@@ -115,24 +115,32 @@ struct GrvtTickerFastFields {
     #[serde(
         default,
         rename = "bb",
+        alias = "bestBidPrice",
+        alias = "best_bid_price",
         deserialize_with = "de_opt_f64_from_num_or_str"
     )]
     bid_px: Option<f64>,
     #[serde(
         default,
         rename = "bb1",
+        alias = "bestBidSize",
+        alias = "best_bid_size",
         deserialize_with = "de_opt_f64_from_num_or_str"
     )]
     bid_qty: Option<f64>,
     #[serde(
         default,
         rename = "ba",
+        alias = "bestAskPrice",
+        alias = "best_ask_price",
         deserialize_with = "de_opt_f64_from_num_or_str"
     )]
     ask_px: Option<f64>,
     #[serde(
         default,
         rename = "ba1",
+        alias = "bestAskSize",
+        alias = "best_ask_size",
         deserialize_with = "de_opt_f64_from_num_or_str"
     )]
     ask_qty: Option<f64>,
@@ -140,6 +148,9 @@ struct GrvtTickerFastFields {
         default,
         rename = "fr2",
         alias = "fundingRate",
+        alias = "funding_rate",
+        alias = "fundingRate8hCurr",
+        alias = "funding_rate_8h_curr",
         deserialize_with = "de_opt_f64_from_num_or_str"
     )]
     funding_rate: Option<f64>,
@@ -147,6 +158,7 @@ struct GrvtTickerFastFields {
         default,
         rename = "nf",
         alias = "nextFundingTime",
+        alias = "next_funding_time",
         deserialize_with = "de_opt_i64_from_num_or_str"
     )]
     next_funding_ts: Option<i64>,
@@ -154,6 +166,7 @@ struct GrvtTickerFastFields {
         default,
         rename = "et",
         alias = "eventTime",
+        alias = "event_time",
         alias = "timestamp",
         deserialize_with = "de_opt_i64_from_num_or_str"
     )]
@@ -224,6 +237,8 @@ struct GrvtTickerFastRoot<'a> {
     payload: Option<GrvtTickerFastData<'a>>,
     #[serde(default)]
     f: Option<GrvtTickerFastFields>,
+    #[serde(default)]
+    feed: Option<GrvtTickerFastFields>,
     #[serde(
         default,
         rename = "et",
@@ -237,9 +252,15 @@ fn is_grvt_ticker_stream(value: &str) -> bool {
 }
 
 fn symbol_from_selector(selector: &str) -> Option<&str> {
-    selector
+    let trimmed = selector
         .strip_prefix("v1.ticker.d.")
         .or_else(|| selector.strip_prefix("v1.ticker.d:"))
+        .unwrap_or(selector);
+    let instrument = trimmed
+        .split_once('@')
+        .map(|(instrument, _)| instrument)
+        .unwrap_or(trimmed);
+    (!instrument.is_empty()).then_some(instrument)
 }
 
 pub fn grvt_symbol_map(markets: &SymbolMarkets) -> HashMap<String, String> {
@@ -369,7 +390,8 @@ pub fn parse_grvt_ticker_message_fast(
 
     let fields = payload
         .and_then(GrvtTickerFastData::fields)
-        .or(root.f.as_ref())?;
+        .or(root.f.as_ref())
+        .or(root.feed.as_ref())?;
 
     let event_ts = fields
         .event_ts
@@ -407,10 +429,8 @@ pub fn parse_grvt_ticker_message_fallback(
         .or_else(|| root.get("s"))
         .and_then(Value::as_str)
         .or_else(|| root.get("selector").and_then(Value::as_str));
-    let payload = root
-        .get("d")
-        .or_else(|| root.get("data"))
-        .or_else(|| root.get("payload"));
+    let payload = root.get("d").or_else(|| root.get("payload"));
+    let direct_fields = root.get("f").or_else(|| root.get("feed"));
     let selector_hint = payload
         .and_then(|payload| payload.get("selector"))
         .or_else(|| payload.and_then(|payload| payload.get("topic")))
@@ -439,19 +459,41 @@ pub fn parse_grvt_ticker_message_fallback(
         .and_then(|payload| payload.get("f"))
         .or_else(|| payload.and_then(|payload| payload.get("feed")))
         .or_else(|| payload.and_then(|payload| payload.get("data")))
+        .or(direct_fields)
         .or(payload)?;
 
-    let bid_px = fields.get("bb").and_then(as_f64);
-    let bid_qty = fields.get("bb1").and_then(as_f64);
-    let ask_px = fields.get("ba").and_then(as_f64);
-    let ask_qty = fields.get("ba1").and_then(as_f64);
+    let bid_px = fields
+        .get("bb")
+        .or_else(|| fields.get("bestBidPrice"))
+        .or_else(|| fields.get("best_bid_price"))
+        .and_then(as_f64);
+    let bid_qty = fields
+        .get("bb1")
+        .or_else(|| fields.get("bestBidSize"))
+        .or_else(|| fields.get("best_bid_size"))
+        .and_then(as_f64);
+    let ask_px = fields
+        .get("ba")
+        .or_else(|| fields.get("bestAskPrice"))
+        .or_else(|| fields.get("best_ask_price"))
+        .and_then(as_f64);
+    let ask_qty = fields
+        .get("ba1")
+        .or_else(|| fields.get("bestAskSize"))
+        .or_else(|| fields.get("best_ask_size"))
+        .and_then(as_f64);
     let funding_rate = fields
         .get("fr2")
         .or_else(|| fields.get("fundingRate"))
+        .or_else(|| fields.get("funding_rate"))
+        .or_else(|| fields.get("fundingRate8hCurr"))
+        .or_else(|| fields.get("funding_rate_8h_curr"))
         .and_then(as_f64);
 
     let event_ts = fields
         .get("et")
+        .or_else(|| fields.get("eventTime"))
+        .or_else(|| fields.get("event_time"))
         .or_else(|| payload.and_then(|payload| payload.get("et")))
         .or_else(|| root.get("et"))
         .or_else(|| root.get("timestamp"))
@@ -462,6 +504,7 @@ pub fn parse_grvt_ticker_message_fallback(
     let next_funding_ts = fields
         .get("nf")
         .or_else(|| fields.get("nextFundingTime"))
+        .or_else(|| fields.get("next_funding_time"))
         .and_then(as_i64)
         .map(normalize_exchange_ts_ms);
 
@@ -495,7 +538,7 @@ fn grvt_selectors(markets: &SymbolMarkets) -> Vec<String> {
             .iter()
             .find(|meta| meta.exchange == Exchange::Grvt)
         {
-            selectors.push(format!("v1.ticker.d.{}", meta.exchange_symbol));
+            selectors.push(format!("{}@500", meta.exchange_symbol));
         }
     }
     selectors.sort_unstable();
@@ -504,7 +547,9 @@ fn grvt_selectors(markets: &SymbolMarkets) -> Vec<String> {
 }
 
 fn grvt_subscribe_payload(selector: &str, request_id: u64) -> String {
-    format!("{{\"op\":\"subscribe\",\"id\":{request_id},\"selector\":\"{selector}\"}}")
+    format!(
+        "{{\"jsonrpc\":\"2.0\",\"method\":\"subscribe\",\"params\":{{\"stream\":\"v1.ticker.d\",\"selectors\":[\"{selector}\"]}},\"id\":{request_id}}}"
+    )
 }
 
 pub async fn run_grvt_feed(
@@ -571,10 +616,7 @@ pub async fn run_grvt_feed(
                                 }
                             };
 
-                            if !raw.contains("v1.ticker.d")
-                                && !raw.contains("\"bb\"")
-                                && !raw.contains("\"fr2\"")
-                            {
+                            if !raw.contains("v1.ticker.d") {
                                 continue;
                             }
 
@@ -646,5 +688,30 @@ pub async fn run_grvt_feed(
         let delay_ms = backoff_delay_ms(attempt);
         attempt = attempt.saturating_add(1);
         tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{grvt_subscribe_payload, symbol_from_selector};
+
+    #[test]
+    fn grvt_selector_parser_accepts_current_live_format() {
+        assert_eq!(
+            symbol_from_selector("BTC_USDT_Perp@500"),
+            Some("BTC_USDT_Perp")
+        );
+        assert_eq!(
+            symbol_from_selector("v1.ticker.d.BTC_USDT_Perp"),
+            Some("BTC_USDT_Perp")
+        );
+    }
+
+    #[test]
+    fn grvt_subscribe_payload_uses_json_rpc_2() {
+        assert_eq!(
+            grvt_subscribe_payload("BTC_USDT_Perp@500", 7),
+            "{\"jsonrpc\":\"2.0\",\"method\":\"subscribe\",\"params\":{\"stream\":\"v1.ticker.d\",\"selectors\":[\"BTC_USDT_Perp@500\"]},\"id\":7}"
+        );
     }
 }

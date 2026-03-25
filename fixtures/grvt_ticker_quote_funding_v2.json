@@ -1,0 +1,16 @@
+{
+  "stream": "v1.ticker.d",
+  "selector": "BTC_USDT_Perp@500",
+  "sequence_number": "0",
+  "feed": {
+    "event_time": "1700000000123456789",
+    "instrument": "BTC_USDT_Perp",
+    "best_bid_price": "100.2",
+    "best_bid_size": "5.1",
+    "best_ask_price": "100.4",
+    "best_ask_size": "4.2",
+    "funding_rate": "0.00012",
+    "next_funding_time": "1700003600000000000"
+  },
+  "prev_sequence_number": "0"
+}

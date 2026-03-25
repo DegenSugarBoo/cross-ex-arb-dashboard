@@ -321,7 +321,7 @@ fn apex_exchange_symbols(markets: &SymbolMarkets) -> Vec<String> {
             .iter()
             .find(|meta| meta.exchange == Exchange::ApeX)
         {
-            symbols.push(meta.exchange_symbol.clone());
+            symbols.push(compact_apex_rest_symbol(&meta.exchange_symbol));
         }
     }
     symbols.sort_unstable();
@@ -372,6 +372,31 @@ fn is_server_pong_message(raw: &str) -> bool {
     raw.contains("\"op\":\"pong\"")
         || raw.contains("\"event\":\"pong\"")
         || raw.trim().eq_ignore_ascii_case("pong")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::apex_exchange_symbols;
+    use crate::discovery::SymbolMarkets;
+    use crate::model::{Exchange, MarketMeta};
+
+    #[test]
+    fn apex_ws_subscriptions_use_compact_symbols() {
+        let mut markets = SymbolMarkets::new();
+        markets.insert(
+            "BTC".to_owned(),
+            vec![MarketMeta {
+                exchange: Exchange::ApeX,
+                symbol_base: "BTC".to_owned(),
+                exchange_symbol: "BTC-USDT".to_owned(),
+                market_id: None,
+                taker_fee_pct: 0.05,
+                maker_fee_pct: 0.0,
+            }],
+        );
+
+        assert_eq!(apex_exchange_symbols(&markets), vec!["BTCUSDT".to_owned()]);
+    }
 }
 
 pub fn parse_apex_depth_event_fast(raw: &str, recv_ts_ms: i64) -> Option<ApexDepthEvent> {

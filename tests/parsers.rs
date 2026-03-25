@@ -446,6 +446,28 @@ fn parses_grvt_ticker_quote_and_funding_fixture() {
 }
 
 #[test]
+fn parses_grvt_current_ticker_quote_and_funding_fixture() {
+    let payload = include_str!("../fixtures/grvt_ticker_quote_funding_v2.json");
+    let symbol_map = HashMap::from([("BTC_USDT_Perp".to_owned(), "BTC".to_owned())]);
+
+    let (quote, funding) =
+        parse_grvt_ticker_message(payload, &symbol_map, 1_700_000_000_999).expect("grvt parse");
+    let quote = quote.expect("grvt quote");
+    let funding = funding.expect("grvt funding");
+
+    assert_eq!(quote.exchange, Exchange::Grvt);
+    assert_eq!(quote.symbol_base, "BTC");
+    assert!((quote.bid_px - 100.2).abs() < 1e-9);
+    assert!((quote.ask_px - 100.4).abs() < 1e-9);
+    assert_eq!(quote.exch_ts_ms, 1_700_000_000_123);
+
+    assert_eq!(funding.exchange, Exchange::Grvt);
+    assert_eq!(funding.symbol_base, "BTC");
+    assert!((funding.funding_rate - 0.00012).abs() < 1e-12);
+    assert_eq!(funding.next_funding_ts_ms, Some(1_700_003_600_000));
+}
+
+#[test]
 fn grvt_ignores_ack_messages() {
     let payload = include_str!("../fixtures/grvt_ticker_ack.json");
     let symbol_map = HashMap::from([("BTC_USDT_Perp".to_owned(), "BTC".to_owned())]);
