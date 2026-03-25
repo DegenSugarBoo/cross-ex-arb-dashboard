@@ -29,6 +29,7 @@ const EDGE_X_BASE_TAKER_FEE_PCT: f64 = 0.038;
 const HYPERLIQUID_BASE_TAKER_FEE_PCT: f64 = 0.045;
 const GRVT_BASE_TAKER_FEE_PCT: f64 = 0.045;
 const APEX_BASE_TAKER_FEE_PCT: f64 = 0.05;
+const IGNORED_COMMON_SYMBOLS: &[&str] = &["DIA"];
 
 pub type SymbolMarkets = HashMap<String, Vec<MarketMeta>>;
 
@@ -693,6 +694,12 @@ fn index_by_common_symbols(exchange_markets: &[Vec<MarketMeta>]) -> SymbolMarket
         metas.len() >= 2
     });
 
+    all_symbols.retain(|symbol, _| {
+        !IGNORED_COMMON_SYMBOLS
+            .iter()
+            .any(|ignored| symbol.eq_ignore_ascii_case(ignored))
+    });
+
     all_symbols
 }
 
@@ -1224,5 +1231,39 @@ pub async fn periodic_discovery_log(config: AppConfig) {
             ),
             Err(err) => tracing::warn!(error = %err, "periodic discovery refresh failed"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::index_by_common_symbols;
+    use crate::model::{Exchange, MarketMeta};
+
+    fn meta(exchange: Exchange, symbol_base: &str, exchange_symbol: &str) -> MarketMeta {
+        MarketMeta {
+            exchange,
+            symbol_base: symbol_base.to_owned(),
+            exchange_symbol: exchange_symbol.to_owned(),
+            market_id: None,
+            taker_fee_pct: 0.04,
+            maker_fee_pct: 0.0,
+        }
+    }
+
+    #[test]
+    fn common_symbol_index_ignores_dia() {
+        let symbols = index_by_common_symbols(&[
+            vec![
+                meta(Exchange::Binance, "BTC", "BTCUSDT"),
+                meta(Exchange::Binance, "DIA", "DIAUSDT"),
+            ],
+            vec![
+                meta(Exchange::Bybit, "BTC", "BTCUSDT"),
+                meta(Exchange::Bybit, "DIA", "DIAUSDT"),
+            ],
+        ]);
+
+        assert!(symbols.contains_key("BTC"));
+        assert!(!symbols.contains_key("DIA"));
     }
 }
