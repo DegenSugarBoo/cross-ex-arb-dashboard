@@ -4,6 +4,8 @@
 
 It watches multiple perp venues in real time, normalizes quote and funding data into one shared model, and surfaces the best two-leg buy/sell routes in a desktop dashboard. The same feed stack can also run headless as a raw market-data collector for replay, benchmarking, and downstream research.
 
+Alongside the live ranked scanner, the app also keeps a rolling 30-second history per directed route so you can inspect short-term spread, notional, and age behavior for an individual symbol.
+
 The project is read-only. It does not place orders, manage positions, or execute trades.
 
 ## Overview
@@ -11,6 +13,7 @@ The project is read-only. It does not place orders, manage positions, or execute
 This repo is built for people who want to:
 
 - monitor live perp spreads across exchanges from one screen
+- inspect a rolling 30-second history for each directed route
 - compare quote, funding, and fee-adjusted net spread behavior
 - collect normalized raw exchange events to disk for offline analysis
 - benchmark parsers, websocket ingestion, and collector throughput
@@ -19,6 +22,34 @@ Out of the box, the project supports two runtime modes:
 
 - Scanner mode: launches an `egui` desktop app that ranks live arbitrage routes.
 - Collector mode: runs headless and writes normalized raw events to partitioned files.
+
+## Screenshots
+
+### Main Scanner Dashboard
+
+The main screen is the live scanner view. It shows exchange health cards across the top and a ranked opportunity table underneath, so you can quickly see which symbols currently have the strongest raw and fee-adjusted spreads across venues.
+
+![cross-ex-arb main scanner dashboard](./assets/main_screen.png)
+
+Key things visible here:
+
+- exchange-level liveness and feed activity
+- ranked cross-exchange routes for each symbol
+- raw spread vs net spread after fee assumptions
+- route size, notional capacity, age, and latency
+
+### Per-Symbol 30-Second History View
+
+The secondary detail window drills into one selected route and shows its rolling 30-second history. This makes it easier to judge whether an opportunity is stable, fading, or just a short-lived spike before acting on it or exporting the data for analysis.
+
+![cross-ex-arb per-symbol 30-second history dashboard](./assets/asset_30s_history.png)
+
+Key things visible here:
+
+- `net_spread_bps` over the recent 30-second window
+- `max_usd_notional` trend for the selected route
+- route age behavior over time
+- a tighter per-symbol lens than the main ranked dashboard
 
 ## Why This Repo Exists
 
@@ -31,7 +62,8 @@ At a high level, the pipeline is:
 3. Stream quote and funding updates from websocket and REST-backed feeds.
 4. Normalize events into a common model.
 5. Rank live directed routes by raw and fee-adjusted spread.
-6. Optionally persist raw envelopes for replay and research.
+6. Retain a rolling 30-second history for per-route inspection.
+7. Optionally persist raw envelopes for replay and research.
 
 ## What It Does
 
