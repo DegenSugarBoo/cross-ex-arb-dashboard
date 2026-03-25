@@ -56,6 +56,34 @@ At a high level, the pipeline is:
 | GRVT | REST `full/v1/instruments` | WS `v1.ticker.d` | WS `v1.ticker.d` | Base taker fee `0.045%` |
 | ApeX | REST `/v3/symbols` | WS `orderBook200.H.<symbol>` with local book state | WS `instrumentInfo.H.<symbol>` | Base taker fee `0.05%` |
 
+## Installation
+
+Prerequisites:
+
+- stable Rust toolchain
+- network access to the supported exchange REST and websocket endpoints
+- a desktop environment if you want to use scanner mode
+
+Install Rust with `rustup` if you do not already have it, then clone and build the project:
+
+```bash
+git clone https://github.com/DegenSugarBoo/cross-ex-arb-dashboard.git
+cd cross-ex-arb-dashboard
+cargo build --release
+```
+
+No exchange API keys are required for the default public-market-data flows.
+
+Quick start:
+
+```bash
+# launch the desktop scanner
+cargo run --release
+
+# or run the headless collector
+cargo run --release -- --collect-mode
+```
+
 ## Runtime Modes
 
 ### Scanner Mode
@@ -214,6 +242,34 @@ Collector tuning:
 - `--collector-max-open-files` default `128`: configured writer handle budget before eviction
 
 Endpoint overrides are available for every exchange feed via `--*-rest-url` and `--*-ws-url` flags, including `--binance-rest-url`, `--binance-ws-url`, `--bybit-rest-url`, `--bybit-ws-url`, `--extended-funding-ws-url`, and `--apex-depth-rest-url`.
+
+## Performance Snapshot
+
+Saved release-mode baselines live in `benchmarks/` and were captured on 2026-03-15 across 3 runs. Absolute numbers will vary by machine, but these snapshots are useful for understanding the current performance envelope and for catching regressions over time.
+
+Core pipeline baseline from `benchmarks/perf_baseline.json`:
+
+| Benchmark | Throughput | Cost |
+| --- | --- | --- |
+| ingest only | 2.80M ev/s | 356.6 ns/ev |
+| run_engine end-to-end | 1.80M ev/s | 557.1 ns/ev |
+| ingest + throttled snapshot | 976k ev/s | 1024.6 ns/ev |
+| snapshot only | 91k snaps/s | 10969.5 ns/snap |
+| aster markPrice parser | 6.47M msg/s | 154.6 ns/msg |
+| aster bookTicker parser | 3.87M msg/s | 258.1 ns/msg |
+| lighter funding parser | 4.32M msg/s | 231.4 ns/msg |
+| hyperliquid bbo parser | 1.52M msg/s | 656.2 ns/msg |
+
+Websocket ingest baseline from `benchmarks/ws_ingest_baseline_post_ws_rollout.json`:
+
+| Benchmark | Throughput | Cost |
+| --- | --- | --- |
+| aster ws ingest markPrice | 1.33M msg/s | 753.8 ns/msg |
+| aster ws ingest bookTicker | 1.08M msg/s | 929.3 ns/msg |
+| lighter ws ingest marketStats | 1.08M msg/s | 924.0 ns/msg |
+| extended ws ingest funding | 851k msg/s | 1175.3 ns/msg |
+| hyperliquid ws ingest bbo | 723k msg/s | 1383.1 ns/msg |
+| edgeX ws ingest depth | 671k msg/s | 1489.6 ns/msg |
 
 ## Development And Validation
 
