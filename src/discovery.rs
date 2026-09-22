@@ -1,3 +1,5 @@
+//! Exchange market discovery, symbol normalization, and common-market indexing.
+
 use std::collections::HashMap;
 use std::time::Duration;
 

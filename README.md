@@ -1,90 +1,54 @@
 # cross-ex-arb
 
+[![quality-and-perf](https://github.com/DegenSugarBoo/cross-ex-arb-dashboard/actions/workflows/perf_gates.yml/badge.svg)](https://github.com/DegenSugarBoo/cross-ex-arb-dashboard/actions/workflows/perf_gates.yml)
 
-![cross-ex-arb main scanner dashboard](./assets/main_screen.png)
+![cross-ex-arb scanner](./assets/main_screen.png)
 
-`cross-ex-arb` is a Rust market-monitoring tool for cross-exchange perpetual futures arbitrage.
+`cross-ex-arb` is a Rust desktop scanner and headless market-data collector for cross-exchange perpetual futures.
 
-It watches multiple perp venues in real time, normalizes quote and funding data into one shared model, and surfaces the best two-leg buy/sell routes in a desktop dashboard. The same feed stack can also run headless as a raw market-data collector for replay, benchmarking, and downstream research.
+It discovers common markets across nine venues, normalizes live quote and funding updates, ranks directed buy/sell routes, and can persist the normalized events for replay or research. The project is read-only: it does not place orders, manage positions, or execute trades.
 
-Alongside the live ranked scanner, the app also keeps a rolling 30-second history per directed route so you can inspect short-term spread, notional, and age behavior for an individual symbol.
+## Features
 
-The project is read-only. It does not place orders, manage positions, or execute trades.
-## Overview
+- Live cross-exchange spread ranking with raw and fee-adjusted basis-point views.
+- Per-route size, USD notional, quote age, feed latency, funding, and liveness metrics.
+- Searchable/sortable `egui` desktop UI with exchange enable/disable controls.
+- Rolling 30-second route history for net spread, available USD, and quote age.
+- Headless collector with bootstrap gating, bounded writer/file-descriptor budgets, and `none`, `zstd`, or `lz4hc` output.
+- Fast parser/engine benchmarks, websocket transport comparisons, fixtures, and regression gates.
 
-This repo is built for people who want to:
+![cross-ex-arb route history](./assets/asset_30s_history.png)
 
-- monitor live perp spreads across exchanges from one screen
-- inspect a rolling 30-second history for each directed route
-- compare quote, funding, and fee-adjusted net spread behavior
-- collect normalized raw exchange events to disk for offline analysis
-- benchmark parsers, websocket ingestion, and collector throughput
+## How it works
 
-Out of the box, the project supports two runtime modes:
+1. Fetch active perpetual markets from each configured exchange.
+2. Normalize symbols and keep markets available on at least two venues.
+3. Stream quotes and funding into a shared event model.
+4. Build both directed routes for every exchange pair.
+5. Rank routes by `net_bps`; the UI displays the top 20 live rows.
+6. Optionally write the raw normalized events to partitioned JSONL files.
 
-- Scanner mode: launches an `egui` desktop app that ranks live arbitrage routes.
-- Collector mode: runs headless and writes normalized raw events to partitioned files.
-Key things visible here:
+## Supported exchanges
 
-- exchange-level liveness and feed activity
-- ranked cross-exchange routes for each symbol
-- raw spread vs net spread after fee assumptions
-- route size, notional capacity, age, and latency
+| Exchange | Quotes | Funding | Fee used by `net_bps` |
+| --- | --- | --- | --- |
+| Lighter | WebSocket ticker | REST poller | Per-market discovery fee |
+| Aster | WebSocket `bookTicker` | REST `premiumIndex` poller | `0.04%` |
+| Binance | WebSocket `bookTicker` | WebSocket `markPrice` | `0.04%` |
+| Bybit | WebSocket `tickers` | WebSocket `tickers` | `0.04%` |
+| Extended | WebSocket order book | WebSocket funding stream | `0.025%` |
+| edgeX | WebSocket depth | WebSocket ticker | Metadata, otherwise `0.038%` |
+| Hyperliquid | WebSocket `bbo` | REST `metaAndAssetCtxs` poller | `0.045%` |
+| GRVT | WebSocket `v1.ticker.d` | WebSocket `v1.ticker.d` | `0.045%` |
+| ApeX | Local snapshot-plus-delta book | WebSocket instrument info | `0.05%` |
 
-![cross-ex-arb per-symbol 30-second history dashboard](./assets/asset_30s_history.png)
-The secondary detail window drills into one selected route and shows its rolling 30-second history. This makes it easier to judge whether an opportunity is stable, fading, or just a short-lived spike before acting on it or exporting the data for analysis.
+Exchange discovery failures are logged and isolated, so an unavailable venue does not prevent the remaining venues from starting. Common-symbol discovery currently excludes `DIA`.
 
+## Requirements and installation
 
-
-
-
-
-## Why This Repo Exists
-
-Cross-exchange arbitrage data is messy: every venue exposes different symbols, websocket payloads, funding formats, and fee rules. `cross-ex-arb` handles that normalization layer so you can focus on observing spreads and evaluating market behavior instead of stitching feeds together by hand.
-
-At a high level, the pipeline is:
-
-1. Discover eligible perpetual markets on each supported exchange.
-2. Map symbols into a shared cross-venue market set.
-3. Stream quote and funding updates from websocket and REST-backed feeds.
-4. Normalize events into a common model.
-5. Rank live directed routes by raw and fee-adjusted spread.
-6. Retain a rolling 30-second history for per-route inspection.
-7. Optionally persist raw envelopes for replay and research.
-
-## What It Does
-
-- Discovers perpetual markets across supported exchanges and builds a common-symbol map.
-- Ingests live quote and funding updates from websocket and REST-backed feeds.
-- Normalizes market data into a shared event model.
-- Computes directed buy/sell routes and retains a rolling 30-second history for each route.
-- Renders the best opportunities in a desktop UI.
-- Optionally writes raw collector envelopes to hourly JSONL partitions before any downstream aggregation.
-
-## Current Exchange Support
-
-| Exchange | Market Discovery | Quote Source | Funding Source | Taker Fee Used in Net Spread |
-| --- | --- | --- | --- | --- |
-| Lighter | REST `orderBooks` | WS `ticker/<market_id>` | REST `funding-rates` poller | Per-market `taker_fee` from discovery |
-| Aster | REST `exchangeInfo` | WS `<symbol>@bookTicker` | REST `premiumIndex` poller | Base taker fee `0.04%` |
-| Binance | REST `exchangeInfo` | WS `<symbol>@bookTicker` combined stream | WS `<symbol>@markPrice` combined stream | Base taker fee `0.04%` |
-| Bybit | REST `v5/market/instruments-info?category=linear` | WS `tickers.<symbol>` | WS `tickers.<symbol>` | Base taker fee `0.04%` |
-| Extended | REST `info/markets` with fallback symbol inference | WS orderbook stream | WS funding stream | Base taker fee `0.025%` |
-| edgeX | REST `meta/getMetaData` | WS `depth.<contractId>.15` | WS `ticker.<contractId>` | `takerFeeRate` from metadata when present, otherwise `0.038%` |
-| Hyperliquid | REST `POST /info` with `type=meta` | WS `bbo` | REST `POST /info` with `type=metaAndAssetCtxs` poller | Base taker fee `0.045%` |
-| GRVT | REST `full/v1/instruments` | WS `v1.ticker.d` | WS `v1.ticker.d` | Base taker fee `0.045%` |
-| ApeX | REST `/v3/symbols` | WS `orderBook200.H.<symbol>` with local book state | WS `instrumentInfo.H.<symbol>` | Base taker fee `0.05%` |
-
-## Installation
-
-Prerequisites:
-
-- stable Rust toolchain
-- network access to the supported exchange REST and websocket endpoints
-- a desktop environment if you want to use scanner mode
-
-Install Rust with `rustup` if you do not already have it, then clone and build the project:
+- Rust stable toolchain (`rustup` recommended)
+- Network access to the configured exchange REST/WebSocket endpoints
+- A desktop environment for scanner mode
 
 ```bash
 git clone https://github.com/DegenSugarBoo/cross-ex-arb-dashboard.git
@@ -92,303 +56,124 @@ cd cross-ex-arb-dashboard
 cargo build --release
 ```
 
-No exchange API keys are required for the default public-market-data flows.
+The default public-market-data flows do not require exchange API keys.
 
-Quick start:
+## Run
 
-```bash
-# launch the desktop scanner
-cargo run --release
-
-# or run the headless collector
-cargo run --release -- --collect-mode
-```
-
-## Runtime Modes
-
-### Scanner Mode
-
-Scanner mode is the default:
+Launch the desktop scanner:
 
 ```bash
 cargo run --release
 ```
 
-What happens in scanner mode:
-
-1. Discovery builds the common market set across exchanges.
-2. Feed tasks stream normalized `Quote` and `Funding` events into the engine.
-3. The engine recomputes directed routes on each event and keeps a strict 30-second history window.
-4. The UI refreshes a ranked table of the top opportunities.
-
-Spread math:
-
-```text
-raw_bps = (sell_bid / buy_ask - 1.0) * 10_000
-net_bps = raw_bps - 2 * (buy_taker_fee_pct * 100) - 2 * (sell_taker_fee_pct * 100)
-```
-
-The UI shows the top 20 rows by `net_bps`.
-
-### Trading Fee Assumptions Behind `net_bps`
-
-`net_bps` is intentionally conservative. The current implementation subtracts taker fees for both exchanges and applies a `2x` multiplier to each exchange leg:
-
-- `buy_taker_fee_pct` is the buy venue's taker fee in percent units, for example `0.04` means `0.04%`
-- `sell_taker_fee_pct` is the sell venue's taker fee in percent units
-- the engine converts each percent fee into basis points by multiplying by `100`
-- each side is then multiplied by `2`, so the formula currently assumes a round-trip style fee haircut on both the buy venue and the sell venue
-- maker fees, rebates, VIP tiers, token discounts, borrow costs, transfer costs, slippage, and funding carry are not folded into `net_bps`
-
-Current fee sources and defaults used by route construction:
-
-| Exchange | Fee Assumption Used In `net_bps` |
-| --- | --- |
-| Lighter | Uses per-market `taker_fee` returned by discovery metadata |
-| Aster | Fixed taker fee `0.04%` |
-| Binance | Fixed taker fee `0.04%` |
-| Bybit | Fixed taker fee `0.04%` |
-| Extended | Fixed taker fee `0.025%` |
-| edgeX | Uses metadata `takerFeeRate` when present, otherwise falls back to `0.038%` |
-| Hyperliquid | Fixed taker fee `0.045%` |
-| GRVT | Fixed taker fee `0.045%` |
-| ApeX | Fixed taker fee `0.05%` |
-
-If your real trading costs differ from these defaults, the displayed `net_bps` should be treated as an approximation rather than execution-ready PnL.
-
-### Collector Mode
-
-Collector mode runs the same discovery and feed stack without launching the desktop UI:
+Run the headless collector:
 
 ```bash
 cargo run --release -- --collect-mode
 ```
 
-Collector behavior:
-
-- Buffers events until every discovered exchange has produced at least one event, or until `--collector-bootstrap-timeout-ms` elapses.
-- Drains the bootstrap buffer once the gate opens.
-- Writes normalized envelopes to hourly JSONL partitions.
-- Emits one `trade_unsupported` marker per discovered `(symbol, exchange)` tuple in collector v1.
-- Flushes periodically and shuts down cleanly on `Ctrl-C` or `SIGTERM`.
-
-## UI Overview
-
-- Exchange status cards show per-exchange liveness, quote rate, funding rate, and last-event age.
-- The main table shows symbol, buy exchange, sell exchange, buy ask, sell bid, raw bps, net bps, funding, size, notional, age, and latency.
-- Clicking a symbol opens a floating route detail pane for that directed route.
-- The detail pane renders linked 30-second charts for `net_spread_bps`, `max_usd_notional`, and `age_ms`.
-
-## Collector Output
-
-Default collector root:
-
-```text
-data/
-```
-
-Partition layout:
-
-- `data/<SYMBOL>/<exchange>/quote/<YYYY-MM-DD>/<HH>.jsonl`
-- `data/<SYMBOL>/<exchange>/funding/<YYYY-MM-DD>/<HH>.jsonl`
-- `data/<SYMBOL>/<exchange>/trade/<YYYY-MM-DD>/<HH>.jsonl`
-- `data/<SYMBOL>/<exchange>/trade_unsupported/<YYYY-MM-DD>/<HH>.jsonl`
-
-With compression enabled, the filename gets an extra suffix:
-
-- `none` -> `.jsonl`
-- `zstd` -> `.jsonl.zst`
-- `lz4hc` -> `.jsonl.lz4`
-
-The current default is `zstd`, based on the repo's codec scorecard that weights size at 60% and throughput at 40%.
-
-Example partition path:
-
-```text
-data/BTC/aster/quote/2026-03-24/13.jsonl.zst
-```
-
-Path components are sanitized before writing. Exchange directory names are lowercased.
-
-Each line is a `CollectorEnvelope` with metadata plus a payload:
-
-```json
-{
-  "schema_version": 1,
-  "record_type": "quote",
-  "global_seq": 1,
-  "exchange": "Aster",
-  "symbol": "BTC",
-  "symbol_base": "BTC",
-  "exchange_symbol": "BTCUSDT",
-  "exchange_ts_ms": 1700000000000,
-  "recv_ts_ms": 1700000000001,
-  "collected_at_ms": 1700000000002,
-  "bid_px": 100.01,
-  "bid_qty": 2.5,
-  "ask_px": 100.02,
-  "ask_qty": 1.7
-}
-```
-
-Replay ordering key for deterministic offline processing:
-
-1. `exchange`
-2. `symbol`
-3. `record_type`
-4. `exchange_ts_ms`
-5. `recv_ts_ms`
-6. `global_seq`
-
-## Requirements
-
-- Stable Rust toolchain
-- Network access to the configured exchange REST and websocket endpoints
-- A desktop environment if you want to run scanner mode
-
-## Common Commands
-
-Show CLI help:
+Useful examples:
 
 ```bash
+# Write uncompressed files to a temporary directory for a smoke run.
+cargo run --release -- \
+  --collect-mode \
+  --collector-compression none \
+  --collector-data-root /tmp/cross-ex-arb-collector-smoke
+
+# Show every available flag and its default.
 cargo run -- --help
-```
 
-Enable logs:
-
-```bash
+# Enable structured logs at info level.
 RUST_LOG=info cargo run --release
 ```
 
-Headless collector smoke run:
+Important runtime flags include:
 
-```bash
-cargo run --release -- --collect-mode --collector-compression=none --collector-data-root /tmp/cross-ex-arb-collector-smoke
+| Flag | Default | Purpose |
+| --- | ---: | --- |
+| `--stale-ms` | `2500` | Hide routes whose older quote leg exceeds this age. |
+| `--funding-poll-secs` | `300` | Baseline interval for REST funding pollers. |
+| `--ui-fps` | `60` | Scanner repaint cap. |
+| `--http-timeout-secs` | `10` | REST request timeout. |
+| `--discovery-refresh-secs` | `600` | Periodic discovery summary interval; `0` disables it. |
+| `--collector-data-root` | `data` | Collector output directory. |
+| `--collector-compression` | `zstd` | `none`, `zstd`, or `lz4hc`. |
+| `--collector-bootstrap-timeout-ms` | `45000` | Maximum collector bootstrap wait. |
+| `--collector-bootstrap-buffer-events` | `131072` | Pre-gate event buffer capacity. |
+| `--collector-write-buffer` | `16384` | Per-writer buffer size. |
+| `--collector-flush-interval-ms` | `1000` | Periodic writer flush interval. |
+| `--collector-max-open-files` | `128` | Configured writer-handle budget. |
+
+Every exchange REST, WebSocket, funding, and ApeX depth endpoint can also be overridden from the CLI. Use `cargo run -- --help` for the complete list.
+
+## Spread and fee model
+
+For a directed route that buys at the ask and sells at the bid:
+
+```text
+raw_bps = (sell_bid / buy_ask - 1) * 10,000
+net_bps = raw_bps - 2 * (buy_fee_pct * 100) - 2 * (sell_fee_pct * 100)
 ```
 
-## Useful Runtime Flags
+The displayed `net_bps` is a conservative screening metric, not executable PnL. It does not include slippage, funding carry, borrow, transfer, withdrawal, VIP-tier, token-discount, or maker/rebate effects. `max_usd_notional` is the smaller displayed top-of-book quantity multiplied by the buy ask.
 
-Scanner and feed tuning:
+## Collector output
 
-- `--stale-ms` default `2500`: max quote age allowed per ranked row
-- `--ui-fps` default `60`: UI repaint cap
-- `--quote-channel-capacity` default `8192`: shared event channel depth
-- `--funding-poll-secs` default `300`: poll cadence for REST-backed funding feeds
-- `--http-timeout-secs` default `10`: REST timeout
-- `--discovery-refresh-secs` default `600`: periodic discovery summary logging
+The default root is `data/`. Files are partitioned as:
 
-Collector tuning:
-
-- `--collect-mode`: disable the UI and run the raw collector
-- `--collector-data-root` default `data`: collector output root
-- `--collector-compression` default `zstd`: `none`, `zstd`, or `lz4hc`
-- `--collector-bootstrap-timeout-ms` default `45000`: maximum wait before opening the bootstrap gate
-- `--collector-write-buffer` default `16384`: bootstrap queue cap and per-writer buffer size
-- `--collector-flush-interval-ms` default `1000`: periodic flush cadence
-- `--collector-max-open-files` default `128`: configured writer handle budget before eviction
-
-Endpoint overrides are available for every exchange feed via `--*-rest-url` and `--*-ws-url` flags, including `--binance-rest-url`, `--binance-ws-url`, `--bybit-rest-url`, `--bybit-ws-url`, `--extended-funding-ws-url`, and `--apex-depth-rest-url`.
-
-## Performance Snapshot
-
-Saved release-mode baselines live in `benchmarks/` and were captured on 2026-03-15 across 3 runs. Absolute numbers will vary by machine, but these snapshots are useful for understanding the current performance envelope and for catching regressions over time.
-
-Core pipeline baseline from `benchmarks/perf_baseline.json`:
-
-| Benchmark | Throughput | Cost |
-| --- | --- | --- |
-| ingest only | 2.80M ev/s | 356.6 ns/ev |
-| run_engine end-to-end | 1.80M ev/s | 557.1 ns/ev |
-| ingest + throttled snapshot | 976k ev/s | 1024.6 ns/ev |
-| snapshot only | 91k snaps/s | 10969.5 ns/snap |
-| aster markPrice parser | 6.47M msg/s | 154.6 ns/msg |
-| aster bookTicker parser | 3.87M msg/s | 258.1 ns/msg |
-| lighter funding parser | 4.32M msg/s | 231.4 ns/msg |
-| hyperliquid bbo parser | 1.52M msg/s | 656.2 ns/msg |
-
-Websocket ingest baseline from `benchmarks/ws_ingest_baseline_post_ws_rollout.json`:
-
-| Benchmark | Throughput | Cost |
-| --- | --- | --- |
-| aster ws ingest markPrice | 1.33M msg/s | 753.8 ns/msg |
-| aster ws ingest bookTicker | 1.08M msg/s | 929.3 ns/msg |
-| lighter ws ingest marketStats | 1.08M msg/s | 924.0 ns/msg |
-| extended ws ingest funding | 851k msg/s | 1175.3 ns/msg |
-| hyperliquid ws ingest bbo | 723k msg/s | 1383.1 ns/msg |
-| edgeX ws ingest depth | 671k msg/s | 1489.6 ns/msg |
-
-## Development And Validation
-
-Run tests:
-
-```bash
-cargo test
+```text
+data/<SYMBOL>/<exchange>/<record_type>/<YYYY-MM-DD>/<HH>.jsonl[.zst|.lz4]
 ```
 
-Run the synthetic codec benchmark directly:
+Collector envelopes contain `schema_version`, `record_type`, a monotonic `global_seq`, exchange/symbol metadata, exchange/receive/collection timestamps, and a flattened payload. Collector v1 writes:
+
+- `quote`: bid/ask prices and quantities
+- `funding`: rate and next-funding timestamp when available
+- `trade_unsupported`: one marker per discovered symbol/exchange tuple; trade streams are not integrated yet
+
+The collector waits until every discovered exchange has produced an event, or until the bootstrap timeout opens the gate, then drains buffered events and begins normal writes. `Ctrl-C` and `SIGTERM` trigger a clean shutdown/flush.
+
+## Development and validation
 
 ```bash
-cargo run --release --bin collector_codec_bench -- --events 200000 --write-buffer 16384
+cargo fmt --check
+cargo test --locked
 ```
 
-Score collector codecs across multiple runs:
-
-```bash
-python3 scripts/collector_codec_bench.py --runs 3
-```
-
-Run the parser and engine performance profile:
+Benchmark and regression helpers:
 
 ```bash
 cargo run --release --bin perf_profile
+cargo run --release --bin collector_codec_bench -- --events 200000 --write-buffer 16384
+python3 scripts/collector_codec_bench.py --runs 3
+python3 scripts/perf_regression_check.py --baseline benchmarks/perf_after_net_tuning.json --runs 3
+python3 scripts/ws_ingest_regression_check.py --baseline benchmarks/ws_ingest_baseline_post_ws_rollout.json --runs 3
 ```
 
-Capture or refresh a performance baseline:
-
-```bash
-./scripts/perf_capture_baseline.py --runs 3 --output benchmarks/perf_baseline.json
-```
-
-Check current performance against the saved baseline:
-
-```bash
-./scripts/perf_regression_check.py --baseline benchmarks/perf_baseline.json --runs 3
-```
-
-Run websocket ingest benchmark scenarios:
+WebSocket transport/ingest comparison requires the optional feature:
 
 ```bash
 cargo run --release --bin ws_exchange_ingest_bench --features ws-compare-tungstenite
-```
-
-Run websocket transport comparison benchmark:
-
-```bash
 cargo run --release --bin ws_transport_bench --features ws-compare-tungstenite
 ```
 
-Check websocket ingest regressions against a saved baseline:
+CI runs the test suite plus the saved engine and WebSocket regression gates on pushes to `main` and pull requests.
 
-```bash
-./scripts/ws_ingest_regression_check.py --baseline benchmarks/ws_ingest_baseline_post_ws_rollout.json --runs 3
-```
+## Project layout
 
-## Project Layout
+- `src/discovery.rs` — market discovery, filtering, symbol normalization, and common-market indexing
+- `src/feeds/` — exchange-specific REST/WebSocket adapters and parsers
+- `src/engine.rs` — quote/funding state, route construction, spread math, rankings, and 30-second history
+- `src/collector.rs` — envelopes, bootstrap gate, partitioning, compression, and writer lifecycle
+- `src/ui.rs` — `egui` scanner, exchange controls, table, search, and route-history plots
+- `src/config.rs` — CLI flags and defaults
+- `src/bin/` — profiling, codec, WebSocket, and Hyperliquid probe binaries
+- `tests/` and `fixtures/` — parser, discovery, spread, history, collector, and integration coverage
+- `scripts/` — benchmark capture and regression-check helpers
 
-- `src/discovery.rs`: exchange market discovery, normalization, symbol intersection, and periodic discovery logging
-- `src/feeds/`: exchange-specific websocket and REST adapters
-- `src/engine.rs`: event ingestion, route history retention, spread computation, rankings, and feed health
-- `src/collector.rs`: collector envelopes, bootstrap gating, partitioning, codecs, and file writer lifecycle
-- `src/ui.rs`: `egui` application, table rendering, exchange cards, and route detail pane
-- `src/config.rs`: CLI configuration
-- `src/bin/`: standalone benchmark and profiling binaries
-- `scripts/`: regression-check and benchmark helper scripts
-- `tests/`: parser, spread, symbol, collector, and integration coverage
+## Caveats
 
-## Notes
-
-- Extended REST discovery can return `403` in some environments; the discovery layer can still infer common `BASE-USD` and `BASE/USD` mappings from other exchanges.
-- edgeX funding is consumed from websocket ticker events to avoid aggressive REST polling.
-- GRVT quote and funding are both normalized from `v1.ticker.d`, including timestamp unit drift across `ns`, `us`, `ms`, and `s`.
-- ApeX quote output is built from local snapshot-plus-delta order book state and resyncs through `/v3/depth` if sequence continuity breaks.
-- Collector v1 persists quotes and funding events today; `trade_unsupported` markers make the absence of trade streams explicit in the dataset.
+- This is market observation and data collection, not an execution system.
+- Venue APIs and fee schedules change; verify endpoints and fee assumptions before relying on the display.
+- Collector v1 records quotes and funding only; the explicit unsupported-trade markers prevent that limitation from being mistaken for an empty trade dataset.

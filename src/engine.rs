@@ -1,3 +1,5 @@
+//! Quote/funding state, directed-route computation, ranking, and history retention.
+
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::sync::{

@@ -3,4 +3,8 @@ data/
 .claude/
 *.md
 !README.md
+!**/README.md
+!CHANGELOG.md
 research/
+.DS_Store
+*.log

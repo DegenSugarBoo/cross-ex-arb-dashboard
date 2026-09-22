@@ -1,3 +1,5 @@
+//! Core components for the read-only cross-exchange scanner and collector.
+
 pub mod collector;
 pub mod config;
 pub mod discovery;

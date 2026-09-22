@@ -1,3 +1,5 @@
+//! Fast WebSocket transport helpers shared by exchange adapters.
+
 use std::future::Future;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;

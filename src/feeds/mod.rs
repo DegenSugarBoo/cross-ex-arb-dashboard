@@ -1,3 +1,5 @@
+//! Exchange-feed orchestration, lifecycle control, and venue adapter modules.
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::RwLock;

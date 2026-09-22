@@ -1,3 +1,5 @@
+//! edgeX depth, ticker/funding, and metadata-driven market ingestion.
+
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;

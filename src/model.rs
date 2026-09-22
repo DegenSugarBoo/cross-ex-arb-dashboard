@@ -1,3 +1,5 @@
+//! Shared market, quote, funding, route, and health data structures.
+
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, RwLock};

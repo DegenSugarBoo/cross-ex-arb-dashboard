@@ -1,3 +1,5 @@
+//! `egui` presentation layer for the live scanner and route-history view.
+
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::{
@@ -585,7 +587,9 @@ impl eframe::App for ArbApp {
         let mut clear_search_after_click = false;
         egui::TopBottomPanel::top("status").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.heading("Cross-Exchange Arb Scanner");
+                ui.heading("cross-ex-arb | Live Spread Monitor");
+                ui.separator();
+                ui.label("READ-ONLY");
                 ui.separator();
                 ui.label(format!("Rows: {row_count}"));
             });

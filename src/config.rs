@@ -27,7 +27,11 @@ impl CollectorCompression {
 }
 
 #[derive(Parser, Debug, Clone)]
-#[command(name = "cross-ex-arb", version, about = "Arb Scanner")]
+#[command(
+    name = "cross-ex-arb",
+    version,
+    about = "Read-only cross-exchange perpetual-futures scanner and collector"
+)]
 pub struct CliArgs {
     #[arg(
         long,

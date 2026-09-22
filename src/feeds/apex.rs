@@ -1,3 +1,5 @@
+//! ApeX discovery, local order-book reconstruction, quotes, and funding.
+
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Duration;

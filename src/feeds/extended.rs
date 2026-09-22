@@ -1,3 +1,5 @@
+//! Extended order-book and funding-stream ingestion.
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;

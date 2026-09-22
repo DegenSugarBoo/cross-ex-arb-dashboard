@@ -1,3 +1,5 @@
+//! GRVT ticker quote/funding ingestion and selector normalization.
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;

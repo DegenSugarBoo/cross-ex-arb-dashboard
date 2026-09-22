@@ -1,3 +1,5 @@
+//! Desktop scanner and headless collector entry point.
+
 use std::collections::HashMap;
 use std::sync::atomic::AtomicU32;
 use std::sync::{Arc, RwLock};
@@ -142,7 +144,7 @@ fn run_ui_mode(
     let ui_config = config.clone();
     let native_options = eframe::NativeOptions::default();
     let ui_result = eframe::run_native(
-        "Arb Scanner",
+        "cross-ex-arb | Live Spread Monitor",
         native_options,
         Box::new(move |_cc| {
             Ok(Box::new(ArbApp::new(

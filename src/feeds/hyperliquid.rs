@@ -1,3 +1,5 @@
+//! Hyperliquid BBO quote and REST funding ingestion.
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;

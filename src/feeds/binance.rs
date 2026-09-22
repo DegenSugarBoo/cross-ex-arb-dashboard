@@ -1,3 +1,5 @@
+//! Binance combined-stream quote and mark-price ingestion.
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;

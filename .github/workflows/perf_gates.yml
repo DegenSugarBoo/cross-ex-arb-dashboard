@@ -1,4 +1,4 @@
-name: perf-gates
+name: quality-and-perf
 
 on:
   pull_request:
@@ -20,8 +20,11 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
 
+      - name: Format check
+        run: cargo fmt --all -- --check
+
       - name: Unit tests
-        run: cargo test -q
+        run: cargo test --locked -q
 
       - name: Perf regression gate
         run: python3 ./scripts/perf_regression_check.py --baseline benchmarks/perf_after_net_tuning.json --runs 3

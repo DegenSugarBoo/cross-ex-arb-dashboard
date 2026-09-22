@@ -1,3 +1,5 @@
+//! Normalized event envelopes, bootstrap gating, partitioning, and writers.
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::future::Future;

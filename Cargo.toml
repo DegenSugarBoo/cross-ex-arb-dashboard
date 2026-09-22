@@ -3,6 +3,10 @@ name = "cross-ex-arb"
 version = "0.1.0"
 edition = "2024"
 default-run = "cross-ex-arb"
+description = "Read-only Rust scanner and market-data collector for cross-exchange perpetual futures."
+repository = "https://github.com/DegenSugarBoo/cross-ex-arb-dashboard"
+readme = "README.md"
+keywords = ["cryptocurrency", "arbitrage", "market-data", "websocket", "egui"]
 
 [features]
 default = []

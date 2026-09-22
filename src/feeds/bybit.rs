@@ -1,3 +1,5 @@
+//! Bybit linear-perpetual ticker ingestion and stateful patch handling.
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
